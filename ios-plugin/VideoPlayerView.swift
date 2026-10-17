@@ -29,7 +29,7 @@ final class VideoPlayerView: UIView {
     private var playerLooper: AVPlayerLooper?
     private var playerItem: AVPlayerItem?
     private var asset: AVURLAsset?
-    private var layer: AVPlayerLayer!
+    private var playerLayer: AVPlayerLayer?
     private var statusObs: NSKeyValueObservation?
 
     /// 原始地址（真实服务器）
@@ -67,11 +67,13 @@ final class VideoPlayerView: UIView {
         backgroundColor = .clear
         isUserInteractionEnabled = false
 
-        let layer = AVPlayerLayer()
-        layer.videoGravity = .resize
-        layer.backgroundColor = UIColor.clear.cgColor
-        self.layer.addSublayer(layer)
-        self.layer = layer
+        // 【命名注意】不能叫 layer —— UIView 已经有 `layer: CALayer`，
+        // 会报 "property 'layer' cannot override a property with type 'CALayer'"。
+        let pl = AVPlayerLayer()
+        pl.videoGravity = .resize
+        pl.backgroundColor = UIColor.clear.cgColor
+        self.layer.addSublayer(pl)
+        self.playerLayer = pl
 
         let opQueue = OperationQueue()
         opQueue.name = "dzc.videoloader"
@@ -83,7 +85,7 @@ final class VideoPlayerView: UIView {
         super.layoutSubviews()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        layer.frame = bounds
+        playerLayer?.frame = bounds
         CATransaction.commit()
     }
 
@@ -95,7 +97,7 @@ final class VideoPlayerView: UIView {
 
         remoteURL = url
         // 竖屏内容铺满，横屏内容留黑边 —— 和抖音一致
-        layer.videoGravity = aspect < 1.0 ? .resizeAspectFill : .resizeAspect
+        playerLayer?.videoGravity = aspect < 1.0 ? .resizeAspectFill : .resizeAspect
 
         // ① 缓存命中 → 直接读本地文件，零网络
         if let path = VideoCache.shared.cachedPath(for: url) {
@@ -129,7 +131,7 @@ final class VideoPlayerView: UIView {
         } else {
             let qp = AVQueuePlayer(playerItem: item)
             queuePlayer = qp
-            layer.player = qp
+            playerLayer?.player = qp
         }
         playerLooper = AVPlayerLooper(player: qp(), templateItem: item)
     }
@@ -138,7 +140,7 @@ final class VideoPlayerView: UIView {
         if let q = queuePlayer { return q }
         let q = AVQueuePlayer()
         queuePlayer = q
-        layer.player = q
+        playerLayer?.player = q
         return q
     }
 
@@ -154,7 +156,7 @@ final class VideoPlayerView: UIView {
         } else {
             let qp = AVQueuePlayer(playerItem: item)
             queuePlayer = qp
-            layer.player = qp
+            playerLayer?.player = qp
         }
         playerLooper = AVPlayerLooper(player: qp(), templateItem: item)
     }
@@ -215,7 +217,7 @@ final class VideoPlayerView: UIView {
             self.responseInfo = nil
         }
         remoteURL = nil
-        layer?.player = nil
+        playerLayer?.player = nil
     }
 
     /// 诊断用
