@@ -195,12 +195,12 @@ final class FeedViewController: UIViewController {
                     self.service.prefetchFirstFrames(Array(page.prefix(6)))
                     if reset {
                         self.collectionView.reloadData()
-                        DispatchQueue.main.async {
-                            self.collectionView.layoutIfNeeded()
-                            self.syncPlayerToIndex(0, priming: false)
-                        }
+                        // 【闪退点】原来在这里直接 layoutIfNeeded()。
+                        // 如果此刻 view 还没进 window，bounds 是 .zero，
+                        // sizeForItemAt 返回 CGSize(0,0)，后续 indexPath/offset 全乱。
+                        // 现在等真正上屏后再同步。
+                        self.scheduleInitialSync()
                     } else if start <= self.currentIndex + 1 {
-                        // 新数据填进邻条
                         self.fillNeighbors()
                     }
                 }
@@ -216,6 +216,22 @@ final class FeedViewController: UIViewController {
 
     private func showSetupPromptIfNeeded() {
         if !service.hasBase { showSetupPrompt() }
+    }
+
+    /// 等视图真正上屏（有非零尺寸）之后再同步播放器。
+    /// 直接 layoutIfNeeded 在 view 还没进 window 时会算出 0 尺寸 → 崩。
+    private func scheduleInitialSync(attempt: Int = 0) {
+        guard attempt < 20 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self else { return }
+            let size = self.collectionView.bounds.size
+            if size.width < 1 || size.height < 1 || self.view.window == nil {
+                self.scheduleInitialSync(attempt: attempt + 1)
+                return
+            }
+            self.collectionView.layoutIfNeeded()
+            self.syncPlayerToIndex(0, priming: false)
+        }
     }
 
     private func showSetupPrompt() {
@@ -336,7 +352,13 @@ extension FeedViewController: UICollectionViewDataSource, UICollectionViewDelega
     func collectionView(_ collectionView: UICollectionView,
                         layout collectionViewLayout: UICollectionViewLayout,
                         sizeForItemAt indexPath: IndexPath) -> CGSize {
-        collectionView.bounds.size
+        // 绝不能返回 .zero：UICollectionViewFlowLayout 收到零尺寸会算不出
+        // contentSize，分页和 offset 全乱，严重时崩。
+        let s = collectionView.bounds.size
+        if s.width < 1 || s.height < 1 {
+            return view.bounds.size.width > 1 ? view.bounds.size : CGSize(width: 1, height: 1)
+        }
+        return s
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {

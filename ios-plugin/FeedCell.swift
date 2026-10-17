@@ -316,12 +316,24 @@ final class FeedCell: UICollectionViewCell {
         btn.setTitle(title, for: .normal)
     }
 
-    /// 播放器的 layer 挂到本 cell
+    /// 播放器的 layer 挂到本 cell。
+    ///
+    /// 【关键】layer 是全池共用的，cell 会被复用 ——
+    /// 必须先把同一 layer 从别的 cell 上摘下来，否则一个 layer 同时
+    /// 出现在两个 cell 里，画面会乱跳，甚至因 superlayer 冲突崩掉。
     func attach(_ playerLayer: AVPlayerLayer?) {
-        playerLayer?.frame = videoContainer.bounds
-        if let l = playerLayer, l.superlayer !== videoContainer.layer {
+        guard let l = playerLayer else { return }
+        // 从原父层摘掉（如果挂在别的 cell 上）
+        if let old = l.superlayer, old !== videoContainer.layer {
+            l.removeFromSuperlayer()
+        }
+        if l.superlayer !== videoContainer.layer {
             videoContainer.layer.addSublayer(l)
         }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        l.frame = videoContainer.bounds
+        CATransaction.commit()
     }
 
     func layoutPlayerLayer(_ playerLayer: AVPlayerLayer?) {
