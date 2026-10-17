@@ -1,18 +1,20 @@
 import Foundation
 import Capacitor
 import WebKit
+import AVFoundation
 
 /// 把 NativeStage 暴露给网页里的 JS。
 ///
-/// 网页侧调用方式（见 native/native-bridge.js）：
-///   window.Capacitor.Plugins.NativeVideo.load({ id, url, nextId, nextUrl })
-///   window.Capacitor.Plugins.NativeVideo.play()
-///   ...
+/// 网页侧（见 native/native-bridge.js）：
+///   Capacitor.Plugins.NativeVideo.load({ id, url, nextId, nextUrl, prevId, prevUrl })
+///   Capacitor.Plugins.NativeVideo.play() / pause() / hold()
+///   Capacitor.Plugins.NativeVideo.advanceDown() / advanceUp()
 ///
-/// 事件回传：
-///   window.addEventListener('native-video-state', e => e.detail)
-///   window.addEventListener('native-video-progress', e => e.detail)
-///   window.addEventListener('native-video-ended', ...)
+/// 事件回传（notifyListeners → bridge 转成 window 事件）：
+///   state     { phase, id }
+///   progress  { id, position, duration, buffered, playing }
+///   ended     {}
+///   error     { message }
 @objc(NativeVideoPlugin)
 public class NativeVideoPlugin: CAPPlugin, CAPBridgedPlugin {
 
@@ -23,18 +25,34 @@ public class NativeVideoPlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "play", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "pause", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "hold", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "advance", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "preloadNext", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "advanceDown", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "advanceUp", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "preloadNeighbors", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setMuted", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "seek", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "setRate", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "replay", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "attach", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "detach", returnType: CAPPluginReturnPromise)
+        CAPPluginMethod(name: "detach", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "debug", returnType: CAPPluginReturnPromise)
     ]
 
     private var stage: NativeStage?
 
+    // MARK: - 生命周期
+
     override public func load() {
+        // 音频会话：允许后台播、允许跟静音键共存
+        do {
+            try AVAudioSession.sharedInstance().setCategory(
+                .playback,
+                mode: .moviePlayback,
+                options: [.mixWithOthers]
+            )
+            try AVAudioSession.sharedInstance().setActive(true)
+        } catch {
+            print("[NativeVideo] AVAudioSession 设置失败: \(error)")
+        }
+
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(handleWebReady),
@@ -43,18 +61,17 @@ public class NativeVideoPlugin: CAPPlugin, CAPBridgedPlugin {
         )
     }
 
-    /// WKWebView 加载完页面后，vc.view 的层级可能被重置，这里重新确保舞台在底部
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    /// WKWebView 加载完 / 重新布局后，vc.view 的层级可能被重置，这里重新确保舞台在底部
     @objc private func handleWebReady() {
-        guard let s = stage else { return }
-        guard let vc = bridge?.viewController else { return }
-        if let webView = bridge?.webView, s.superview === vc.view, vc.view.subviews.first !== s {
+        guard let s = stage, let vc = bridge?.viewController else { return }
+        if let webView = bridge?.webView, s.superview === vc.view {
             vc.view.insertSubview(s, belowSubview: webView)
             vc.view.sendSubviewToBack(s)
         }
-    }
-
-    deinit {
-        NotificationCenter.default.removeObserver(self)
     }
 
     // MARK: - 舞台挂载
@@ -67,7 +84,6 @@ public class NativeVideoPlugin: CAPPlugin, CAPBridgedPlugin {
         s.translatesAutoresizingMaskIntoConstraints = true
         s.autoresizingMask = [.flexibleWidth, .flexibleHeight]
 
-        // 事件回传
         s.onStateChange = { [weak self] payload in
             self?.notifyListeners("state", data: payload)
         }
@@ -82,8 +98,8 @@ public class NativeVideoPlugin: CAPPlugin, CAPBridgedPlugin {
         }
 
         // 关键：插到 WKWebView **下面**。
-        // 这样页面 UI（文案/按钮）画在上面，视频画面在底层 ——
-        // 网页侧把 body/容器背景设为透明，就形成了「底原生画面 + 上网页 UI」的叠加。
+        // 页面 UI（文案/按钮）画在上面，视频画面在底层 ——
+        // 网页侧把 body/容器背景设为透明，就形成「底原生画面 + 上网页 UI」。
         vc.view.backgroundColor = .black
         if let webView = bridge?.webView {
             vc.view.insertSubview(s, belowSubview: webView)
@@ -112,10 +128,8 @@ public class NativeVideoPlugin: CAPPlugin, CAPBridgedPlugin {
 
     @objc func detach(_ call: CAPPluginCall) {
         stage?.isHidden = true
-        stage?.setMuted(true)
-        if let s = stage {
-            s.pause()
-        }
+        // 用 hold 而不是 pause：detach 只是临时离场，不该清掉"想播"的意图
+        stage?.hold()
         call.resolve(["ok": true])
     }
 
@@ -132,7 +146,30 @@ public class NativeVideoPlugin: CAPPlugin, CAPBridgedPlugin {
             current: id,
             url: url,
             next: call.getString("nextId"),
-            nextURL: call.getString("nextUrl")
+            nextURL: call.getString("nextUrl"),
+            prev: call.getString("prevId"),
+            prevURL: call.getString("prevUrl")
+        )
+        call.resolve(["ok": true])
+    }
+
+    @objc func preloadNeighbors(_ call: CAPPluginCall) {
+        guard let s = stage else {
+            call.resolve(["ok": false])
+            return
+        }
+        // 复用 load：同一条不会重建，只补邻条
+        guard let id = call.getString("id"), let url = call.getString("url") else {
+            call.resolve(["ok": false])
+            return
+        }
+        s.load(
+            current: id,
+            url: url,
+            next: call.getString("nextId"),
+            nextURL: call.getString("nextUrl"),
+            prev: call.getString("prevId"),
+            prevURL: call.getString("prevUrl")
         )
         call.resolve(["ok": true])
     }
@@ -152,14 +189,12 @@ public class NativeVideoPlugin: CAPPlugin, CAPBridgedPlugin {
         call.resolve(["ok": true])
     }
 
-    @objc func advance(_ call: CAPPluginCall) {
-        let ok = stage?.advanceToNext() ?? false
-        call.resolve(["ok": ok])
+    @objc func advanceDown(_ call: CAPPluginCall) {
+        call.resolve(["ok": stage?.advanceDown() ?? false])
     }
 
-    @objc func preloadNext(_ call: CAPPluginCall) {
-        stage?.preloadNext(id: call.getString("id"), url: call.getString("url"))
-        call.resolve(["ok": true])
+    @objc func advanceUp(_ call: CAPPluginCall) {
+        call.resolve(["ok": stage?.advanceUp() ?? false])
     }
 
     @objc func setMuted(_ call: CAPPluginCall) {
@@ -172,8 +207,13 @@ public class NativeVideoPlugin: CAPPlugin, CAPBridgedPlugin {
         call.resolve(["ok": true])
     }
 
-    @objc func setRate(_ call: CAPPluginCall) {
-        stage?.setRate(Float(call.getDouble("rate") ?? 1))
+    @objc func replay(_ call: CAPPluginCall) {
+        stage?.replay()
         call.resolve(["ok": true])
+    }
+
+    /// 真机排错用：返回三个槽位的状态
+    @objc func debug(_ call: CAPPluginCall) {
+        call.resolve(stage?.debugSnapshot() ?? ["error": "stage 未挂载"])
     }
 }

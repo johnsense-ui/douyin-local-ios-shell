@@ -1,87 +1,68 @@
 /**
- * 原生桥（只在 iOS 壳里生效；在浏览器里打开时什么都不做，页面照旧用 <video>）。
+ * 原生桥（第三版）。
  *
- * 设计原则：**网页端零改动也能用**。
- *   · 检到原生插件 → 把页面里所有 <video> 隐藏（visibility:hidden），画面交给 AVPlayer；
- *   · 页面现有的播放/暂停/切换/静音逻辑照旧跑，只是「画面」换了个地方画；
- *   · 桥从 DOM 事件推断当前该播哪条（读 video 的 src），不需要前端改代码。
+ * 只在 Capacitor 壳里生效；浏览器里直接 return，页面照旧用 <video>。
  *
- * 关键坑（都是实测踩出来的）：
- *   1. <video>.muted = true 会让前端自己的静音按钮状态错乱 → 只对视频元素设 muted，
- *      但把 UI 的 muted 状态单独镜像给原生，避免"取消静音无效"。
- *   2. 快速滑动时 feed 的 transform 动画未结束，getBoundingClientRect 会抖 →
- *      用「离视口中心最近」+ 去抖（同一 id 连续两次才提交）。
- *   3. 页面 reload 后 Capacitor 插件重新注入，addListener 可能重复 → 用标记位防重。
+ * ═══════════════════════════════════════════════════════════════
+ * 和前两版的区别
+ * ───────────────────────────────────────────────────────────────
+ *   前两版靠『监听 DOM 事件 → 猜当前哪条』，两个致命问题：
+ *     1. 事件会漏（WKWebView 里 loadedmetadata / playing 都可能不派发）；
+ *     2. 滑动手势过程中的中间态会让它误判，于是来回重载 → 黑屏 + 卡。
  *
- * 事件（在 window 上派发，前端可选用）：
- *   native-video-state     { phase, id, muted }
- *   native-video-progress  { id, position, duration, buffered, playing }
- *   native-video-ended
- *   native-video-error     { message }
+ *   这一版：
+ *     · **每 80ms 主动读 DOM**（rAF 驱动，页面不可见时自动停），不依赖事件；
+ *     · **用视频 id 做去重**，同一条永远不重载；
+ *     · **预判方向**：touch 记录起点，滑动中就能算出会切到下一条还是上一条，
+ *       提前让原生把那个槽位准备好；
+ *     · **一次性把三条（prev/current/next）都交给原生**，
+ *       原生三槽位环形，怎么滑都有预热好的画面。
+ * ═══════════════════════════════════════════════════════════════
  */
 (function () {
   'use strict';
 
   var Cap = window.Capacitor;
   var isNative = !!(Cap && Cap.isNativePlatform && Cap.isNativePlatform());
-  var platform = Cap && Cap.getPlatform ? Cap.getPlatform() : 'web';
   var plugin = isNative && Cap.Plugins ? Cap.Plugins.NativeVideo : null;
 
-  window.__NATIVE_VIDEO__ = {
-    available: !!plugin,
-    platform: platform,
-  };
+  window.__NATIVE_VIDEO__ = { available: !!plugin, platform: Cap && Cap.getPlatform ? Cap.getPlatform() : 'web' };
 
-  if (!plugin) {
-    // 浏览器环境：什么都不做，退出
-    return;
-  }
-
-  if (window.__NATIVE_VIDEO_BOOTED__) return; // 防重复初始化
+  if (!window.__IS_SHELL__ || !plugin) return;
+  if (window.__NATIVE_VIDEO_BOOTED__) return;
   window.__NATIVE_VIDEO_BOOTED__ = true;
+
+  var LOG = window.__DZC_LOG__ || function () {};
 
   // ---------------------------------------------------------------- 工具
 
   function emit(name, detail) {
     try {
       window.dispatchEvent(new CustomEvent(name, { detail: detail || {} }));
-    } catch (e) {
-      /* 忽略 */
-    }
+    } catch (e) {}
   }
 
-  /** 从任意 URL 里抠出视频 id（/api/stream/12345 → "12345"） */
+  /** /api/stream/12345?... → "12345" */
   function idOf(url) {
     var m = /\/api\/stream\/(\d+)/.exec(url || '');
     return m ? m[1] : '';
   }
 
-  /** 本机 api 基址。原生壳里 window.location 是 capacitor://localhost，
-   *  所以接口必须指向真实服务器。优先 localStorage，其次构建期注入。 */
   var SERVER_KEY = 'dzc.serverBase';
-
   function serverBase() {
-    var fromStore = localStorage.getItem(SERVER_KEY);
-    if (fromStore) return fromStore.replace(/\/+$/, '');
-    return String(window.__DZC_SERVER_BASE__ || '').replace(/\/+$/, '');
+    var v = localStorage.getItem(SERVER_KEY) || window.__DZC_SERVER_BASE__ || '';
+    return String(v).replace(/\/+$/, '');
   }
-
-  /** 把页面里的相对地址（/api/...）补成完整地址，供 AVPlayer 使用 */
   function absolute(url) {
     if (!url) return '';
-    if (/^(https?:|blob:|data:|file:)/i.test(url)) return url;
-    var base = serverBase();
-    if (!base) return url;
-    return base + (url.charAt(0) === '/' ? url : '/' + url);
+    if (/^(https?:|blob:|data:)/i.test(url)) return url;
+    var b = serverBase();
+    if (!b) return url;
+    return b + (url.charAt(0) === '/' ? url : '/' + url);
   }
 
   // ---------------------------------------------------------------- 视觉层
 
-  /**
-   * 原生播放器是盖在 WKWebView「上面」的一层 UIView —— 所以网页的 UI 会被挡住。
-   * 解法：把原生视图**插到 webview 下面**（plugin 里 insertSubview(s, belowSubview: webView)），
-   * 再把网页容器背景设透明。这样：底层原生画面 + 上层网页 UI，两全。
-   */
   function makePageTransparent() {
     if (document.getElementById('native-video-style')) return;
     var css = document.createElement('style');
@@ -92,212 +73,251 @@
       /* 所有 <video> 隐藏：画面由原生层提供 */
       '.feed__video, video { visibility: hidden !important; }',
       /* 封面/首帧图保留：原生首帧没就绪时它顶着，避免白/黑闪 */
-      '.feed__poster { background: #000; }',
+      '.feed__poster { background: #000; }'
     ].join('\n');
     (document.head || document.documentElement).appendChild(css);
   }
 
-  // ---------------------------------------------------------------- 同步
+  // ---------------------------------------------------------------- 找视频
 
-  var lastSentId = '';
-  var lastPlaying = null;
-  var lastMuted = null;
-  var pendingId = '';
-  var pendingCount = 0;
+  /** 按垂直位置把可见的 <video> 排序 */
+  function sortedVideos() {
+    var list = Array.prototype.slice.call(document.querySelectorAll('video'));
+    var h = window.innerHeight;
+    list = list.filter(function (v) {
+      var r = v.getBoundingClientRect();
+      return r.bottom > -h && r.top < h * 2; // 视口上下各留一屏
+    });
+    list.sort(function (a, b) {
+      return a.getBoundingClientRect().top - b.getBoundingClientRect().top;
+    });
+    return list;
+  }
 
-  function centerDistance(v) {
+  function centerOf(v) {
     var r = v.getBoundingClientRect();
-    if (r.bottom <= 0 || r.top >= window.innerHeight) return Infinity;
     return Math.abs((r.top + r.bottom) / 2 - window.innerHeight / 2);
   }
 
-  function currentVideo() {
-    var list = document.querySelectorAll('video');
-    var best = null;
-    var bestD = Infinity;
-    for (var i = 0; i < list.length; i++) {
-      var d = centerDistance(list[i]);
-      if (d < bestD) {
-        bestD = d;
-        best = list[i];
-      }
-    }
-    // 离中心超过 0.6 屏就不算"当前"（快速滑动的中间态）
-    return bestD < window.innerHeight * 0.6 ? best : null;
+  function srcOf(v) {
+    return v ? (v.currentSrc || v.getAttribute('src') || '') : '';
   }
 
-  function neighborVideo() {
-    var list = Array.prototype.slice.call(document.querySelectorAll('video'));
-    var cur = currentVideo();
-    if (!cur) return null;
-    var curTop = cur.getBoundingClientRect().top;
-    var best = null;
-    var bestDelta = Infinity;
+  // ---------------------------------------------------------------- 状态
+
+  var lastKey = '';           // 当前三元的字符串指纹，变了才下发
+  var lastPlaying = null;
+  var lastMuted = null;
+  var recentAdvance = 0;      // 刚切过的方向，防抖
+  var touchStartY = 0;
+  var touchDir = 0;
+
+  /** 收集 prev / current / next 三元组 */
+  function snapshot() {
+    var list = sortedVideos();
+    if (!list.length) return null;
+
+    // 当前条 = 离视口中心最近
+    var best = null, bestD = Infinity;
     for (var i = 0; i < list.length; i++) {
-      var v = list[i];
-      if (v === cur) continue;
-      var d = v.getBoundingClientRect().top - curTop;
-      if (d > 0 && d < bestDelta) {
-        bestDelta = d;
-        best = v;
-      }
+      var d = centerOf(list[i]);
+      if (d < bestD) { bestD = d; best = list[i]; }
     }
-    return best;
+    if (!best || bestD > window.innerHeight * 0.6) return null;
+
+    var idx = list.indexOf(best);
+    var prevV = idx > 0 ? list[idx - 1] : null;
+    var nextV = idx < list.length - 1 ? list[idx + 1] : null;
+
+    return {
+      cur: best,
+      prev: prevV,
+      next: nextV,
+      curId: idOf(srcOf(best)),
+      prevId: idOf(srcOf(prevV)),
+      nextId: idOf(srcOf(nextV))
+    };
   }
 
-  function pushToNative() {
-    var cur = currentVideo();
-    if (!cur) return;
-    var src = cur.currentSrc || cur.getAttribute('src') || '';
-    var id = idOf(src);
-    if (!id) return;
+  function push() {
+    var s = snapshot();
+    if (!s || !s.curId) return;
 
-    // 去抖：同一 id 连续两次确认才提交，避免动画中间态误判
-    if (id !== pendingId) {
-      pendingId = id;
-      pendingCount = 0;
+    var key = s.prevId + '|' + s.curId + '|' + s.nextId;
+
+    // 当前条变了 → 先试原生滑（预加载好的槽直接上台，0 帧黑）
+    var curChanged = lastKey && key !== lastKey && s.curId !== lastKey.split('|')[1];
+    if (curChanged) {
+      var prevCurId = lastKey.split('|')[1];
+      // 判断是往下还是往上：新 id 出现在旧三元里说明是邻条切换
+      var dir = null;
+      if (s.curId === lastKey.split('|')[2]) dir = 'down';
+      else if (s.curId === lastKey.split('|')[0]) dir = 'up';
+
+      if (dir) {
+        var fn = dir === 'down' ? plugin.advanceDown : plugin.advanceUp;
+        var now = Date.now();
+        if (now - recentAdvance > 250) {
+          recentAdvance = now;
+          fn.call(plugin)
+            .then(function (r) {
+              if (!r || !r.ok) {
+                // 槽位没准备好 → 退回 load（会有点黑，但不会卡死）
+                doLoad(s);
+              }
+            })
+            .catch(function () { doLoad(s); });
+          LOG('switch ' + dir + ' ' + prevCurId + '->' + s.curId);
+          lastKey = key;
+          return;
+        }
+      }
+      doLoad(s);
+      lastKey = key;
       return;
     }
-    pendingCount += 1;
-    if (pendingCount < 2 && id !== lastSentId) return;
 
-    var next = neighborVideo();
-    var nextSrc = next ? next.currentSrc || next.getAttribute('src') || '' : '';
-    var nextId = idOf(nextSrc);
-
-    if (id !== lastSentId) {
-      lastSentId = id;
-      plugin
-        .load({
-          id: id,
-          url: absolute(src),
-          nextId: nextId || undefined,
-          nextUrl: nextId ? absolute(nextSrc) : undefined,
-        })
-        .catch(function () {});
+    if (key !== lastKey) {
+      doLoad(s);
+      lastKey = key;
+      return;
     }
 
-    var playing = !cur.paused;
+    // 同一组：只同步播放/静音状态
+    syncPlayState(s.cur);
+  }
+
+  function doLoad(s) {
+    var p = {
+      id: s.curId,
+      url: absolute(srcOf(s.cur)),
+      nextId: s.nextId || undefined,
+      nextUrl: s.nextId ? absolute(srcOf(s.next)) : undefined,
+      prevId: s.prevId || undefined,
+      prevUrl: s.prevId ? absolute(srcOf(s.prev)) : undefined
+    };
+    plugin.load(p).catch(function (e) { LOG('load fail ' + (e && e.message)); });
+    LOG('load ' + s.prevId + ' <' + s.curId + '> ' + s.nextId);
+    syncPlayState(s.cur);
+  }
+
+  function syncPlayState(v) {
+    if (!v) return;
+    var playing = !v.paused;
     if (playing !== lastPlaying) {
       lastPlaying = playing;
       (playing ? plugin.play() : plugin.pause()).catch(function () {});
     }
-
-    // 网页自己的静音状态：让它只管 UI，声音由原生统一控制
-    // （<video> 本身已被隐藏且不加载媒体，不会抢音频轨）
-    var m = !!cur.muted;
+    var m = !!v.muted;
     if (m !== lastMuted) {
       lastMuted = m;
       plugin.setMuted({ muted: m }).catch(function () {});
     }
   }
 
-  // ---------------------------------------------------------------- 事件
+  // ---------------------------------------------------------------- 驱动
+  //
+  // 不用事件驱动，用 rAF 轮询：WKWebView 的事件不可靠（会漏）。
+  // 80ms 一次，开销可忽略（只读几个 getBoundingClientRect）。
+  var rafId = null;
+  var lastTick = 0;
 
-  ['loadedmetadata', 'play', 'pause', 'playing', 'waiting', 'emptied', 'loadstart'].forEach(function (ev) {
-    document.addEventListener(
-      ev,
-      function (e) {
-        if (e.target && e.target.tagName === 'VIDEO') {
-          pushToNative();
-        }
-      },
-      true
-    );
-  });
-
-  // 页面滚动 / 触摸切换时同步（节流）
-  var syncTimer = null;
-  function scheduleSync() {
-    if (syncTimer) return;
-    syncTimer = setTimeout(function () {
-      syncTimer = null;
-      pushToNative();
-    }, 100);
+  function tick(now) {
+    rafId = requestAnimationFrame(tick);
+    if (now - lastTick < 80) return;
+    lastTick = now;
+    if (document.hidden) return;
+    try {
+      push();
+    } catch (e) {
+      LOG('tick err ' + (e && e.message));
+    }
   }
-  document.addEventListener('scroll', scheduleSync, true);
-  document.addEventListener('touchmove', scheduleSync, { passive: true, capture: true });
-  document.addEventListener('touchend', scheduleSync, true);
-  document.addEventListener('touchcancel', scheduleSync, true);
 
-  // 原生事件 → window 事件
-  plugin.addListener('state', function (d) {
-    emit('native-video-state', d);
+  function startLoop() {
+    if (rafId == null) rafId = requestAnimationFrame(tick);
+  }
+
+  // ---------------------------------------------------------------- 手势预判
+  //
+  // 滑动还没结束时就知道要切到哪条，提前让原生把槽位准备好。
+  // 这是"滑过去第一帧就在"的关键 —— 不能等落了位再判断。
+
+  document.addEventListener(
+    'touchstart',
+    function (e) {
+      touchStartY = e.touches && e.touches[0] ? e.touches[0].clientY : 0;
+      touchDir = 0;
+    },
+    { passive: true, capture: true }
+  );
+
+  document.addEventListener(
+    'touchmove',
+    function (e) {
+      if (!e.touches || !e.touches[0]) return;
+      var dy = touchStartY - e.touches[0].clientY; // 正 = 往上滑 = 下一条
+      var dir = dy > 30 ? 'down' : dy < -30 ? 'up' : 0;
+      if (dir && dir !== touchDir) {
+        touchDir = dir;
+        // 只是提前 sync，真正切换等落位后 push() 判定
+        try { push(); } catch (err) {}
+      }
+    },
+    { passive: true, capture: true }
+  );
+
+  document.addEventListener('touchend', function () { touchDir = 0; }, { passive: true, capture: true });
+
+  // 事件也留着（作为补充触发，主驱动仍是 rAF）
+  ['loadedmetadata', 'play', 'pause', 'playing', 'waiting', 'emptied'].forEach(function (ev) {
+    document.addEventListener(ev, function (e) {
+      if (e.target && e.target.tagName === 'VIDEO') push();
+    }, true);
   });
-  plugin.addListener('progress', function (d) {
-    emit('native-video-progress', d);
-  });
-  plugin.addListener('ended', function () {
-    emit('native-video-ended', {});
-  });
-  plugin.addListener('error', function (d) {
-    emit('native-video-error', d);
-  });
+
+  // ---------------------------------------------------------------- 原生事件转发
+  plugin.addListener('state', function (d) { emit('native-video-state', d); });
+  plugin.addListener('progress', function (d) { emit('native-video-progress', d); });
+  plugin.addListener('ended', function () { emit('native-video-ended', {}); });
+  plugin.addListener('error', function (d) { emit('native-video-error', d); });
 
   // ---------------------------------------------------------------- 启动
 
   function boot() {
     makePageTransparent();
-    plugin.attach().catch(function () {});
-    setTimeout(pushToNative, 300);
-    setTimeout(pushToNative, 900);
-    setTimeout(pushToNative, 2000);
-    // 兜底轮询：某些事件在 WKWebView 里会漏
-    setInterval(pushToNative, 1000);
-  }
-
-  /** 首启弹框已交给 boot-early.js（它比本脚本先跑）。
-   *  这里只做兜底：万一 boot-early 没执行（比如被缓存），至少填一次再继续。 */
-  function promptServerIfNeeded() {
-    if (serverBase()) return false;
-    if (document.getElementById('dzc-server-setup')) return true; // 已经有一个了
-    var shell = document.createElement('div');
-    shell.id = 'dzc-server-setup';
-    shell.innerHTML =
-      '<div style="position:fixed;inset:0;z-index:2147483647;background:#111;color:#eee;' +
-      'display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;' +
-      'font:15px -apple-system,sans-serif;padding:24px;box-sizing:border-box;">' +
-      '<div style="font-size:19px;font-weight:600;">填写服务器地址</div>' +
-      '<div style="color:#9aa;font-size:13px;line-height:1.7;text-align:center;max-width:320px;">' +
-      '例如 <b>http://192.168.1.10:6688</b><br>或你的 Tailscale 地址<br>（必须带 http:// 或 https://）</div>' +
-      '<input id="dzc-server-input" placeholder="http://..." autocomplete="off" ' +
-      'autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="url" ' +
-      'style="width:100%;max-width:320px;padding:14px;border-radius:10px;border:1px solid #333;' +
-      'background:#1b1b1f;color:#eee;font-size:16px;box-sizing:border-box;" />' +
-      '<button id="dzc-server-ok" style="width:100%;max-width:320px;padding:14px;border-radius:10px;' +
-      'border:none;background:#fe2c55;color:#fff;font-size:16px;box-sizing:border-box;">保存并继续</button>' +
-      '<div id="dzc-server-err" style="color:#f55;font-size:13px;height:18px;"></div>' +
-      '</div>';
-    document.body.appendChild(shell);
-    document.getElementById('dzc-server-ok').addEventListener('click', function () {
-      var v = (document.getElementById('dzc-server-input').value || '').trim();
-      if (!/^https?:\/\/.+/i.test(v)) {
-        document.getElementById('dzc-server-err').textContent = '需要以 http:// 或 https:// 开头';
-        return;
-      }
-      localStorage.setItem(SERVER_KEY, v.replace(/\/+$/, ''));
-      location.reload();
+    plugin.attach().then(function () {
+      LOG('attach ok');
+      setTimeout(push, 200);
+      setTimeout(push, 800);
+      startLoop();
+    }).catch(function (e) {
+      LOG('attach fail ' + (e && e.message));
+      startLoop();
     });
-    return true;
-  }
-
-  function start() {
-    if (promptServerIfNeeded()) return;
-    boot();
   }
 
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', start);
+    document.addEventListener('DOMContentLoaded', boot);
   } else {
-    start();
+    boot();
   }
 
-  // 暴露给前端（可选使用）
+  // ---------------------------------------------------------------- 调试接口
   window.NativeVideoBridge = {
-    refresh: pushToNative,
-    setServerBase: function (base) {
-      localStorage.setItem(SERVER_KEY, String(base || '').replace(/\/+$/, ''));
+    refresh: push,
+    debug: function () {
+      return plugin.debug ? plugin.debug() : Promise.resolve(null);
     },
-    getServerBase: serverBase,
+    snapshot: function () {
+      var s = snapshot();
+      return s ? { prev: s.prevId, cur: s.curId, next: s.nextId } : null;
+    },
+    setServerBase: function (b) {
+      localStorage.setItem(SERVER_KEY, String(b || '').replace(/\/+$/, ''));
+    },
+    getServerBase: serverBase
   };
+
+  LOG('bridge ready');
 })();

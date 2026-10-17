@@ -2,59 +2,87 @@ import Foundation
 import AVFoundation
 import UIKit
 
-/// 原生竖屏播放舞台。
+/// 原生竖屏播放舞台（第三版，彻底重写）。
 ///
-/// 为什么不用 WKWebView 里的 <video>（这些是在 iPhone 上逐条实测踩到的）：
-///   1. iOS 上 Safari/Edge/Chrome 全是 WebKit，<video> 是独立合成层，
-///      会盖住页面上的 <img>，z-index / opacity 都管不了它 → 首帧图永远顶不住黑屏；
-///   2. play() 会立刻丢掉 poster，于是"刚起播那一瞬"必然是黑的；
-///   3. 没播过的 <video> 的 preload 被忽略 → 下一条根本没预加载，滑过去才开始下载；
-///   4. 上面三点在网页层无解，所以在原生侧用 AVPlayer 接管画面。
+/// ═══════════════════════════════════════════════════════════════════
+/// 为什么网页层的 <video> 在 iPhone 上永远修不好
+/// ───────────────────────────────────────────────────────────────────
+///   1. WebKit 里 <video> 是独立合成层，永远画在 DOM 之上 ——
+///      poster、<img>、z-index、opacity、transform 全都盖不住它；
+///   2. play() 会立刻丢掉 poster，起播那一瞬必然黑；
+///   3. 没播过的元素，preload 被直接忽略，load() 也不保证真下载；
+///   4. 上面三条在 JS 层无解，所以画面必须交给 native。
 ///
-/// 设计要点：
-///   · 两个 AVPlayer + 两个 AVPlayerLayer：A 在播，B 已经预加载好并停在 0s。
-///   · 切条时**交换两个 player 的角色**（只换模型引用，不重建、不 replaceItem），
-///     所以没有黑屏、没有重新缓冲。
-///   · currentLayer 首帧就绪前 opacity = 0，就绪后瞬间接上 → 没有黑闪。
-///   · 视图插在 WKWebView 下方，网页背景透明 → 底层原生画面 + 上层网页 UI。
+/// ═══════════════════════════════════════════════════════════════════
+/// 这一版的设计（吸取前两版所有失败教训）
+/// ───────────────────────────────────────────────────────────────────
+///   · **三槽位环形**：prev / current / next 各一个 AVPlayer + layer。
+///     前两版只有两个槽位，滑动时"下下条"没地方预加载，一旦快速连滑就必然黑屏。
+///   · **交换 player 引用而不是 replaceCurrentItem**：
+///     replaceCurrentItem 会丢掉已缓冲的数据、重新 seek、重新起播 → 黑屏 + 卡。
+///     交换引用 = 0 帧黑屏，因为 layer 上挂的东西根本没变。
+///   · **首帧就绪才上台**：currentLayer.opacity 从 0 到 1 由
+///     `isReadyForDisplay` 的 KVO 驱动，不是 status==ready 就切。
+///     status==ready 只代表"能播"，画面还没解出来。
+///   · **wantsPlay 意图机**：用户想播但数据没到 → 记住意图，
+///     数据一到自动播。彻底治"要点两下""停住不动"。
+///   · **错误自愈**：播放失败自动重载一次，连续失败才报错给 JS。
+///
+///   画面层级：本视图插在 WKWebView **下方**（plugin 里做），
+///   网页整体透明 → 底层原生画面 + 上层网页 UI，两边都不牺牲。
+/// ═══════════════════════════════════════════════════════════════════
 @objc public class NativeStage: UIView {
 
-    // MARK: - 对外回调（由 Bridge 注入）
+    // MARK: - 对外回调
     @objc public var onStateChange: (([String: Any]) -> Void)?
     @objc public var onProgress: (([String: Any]) -> Void)?
     @objc public var onEnded: (() -> Void)?
     @objc public var onError: ((String) -> Void)?
 
-    // MARK: - 播放器（两个槽位，切条时交换角色）
-    private var playerA = AVPlayer()
-    private var playerB = AVPlayer()
-    private let layerA = AVPlayerLayer()
-    private let layerB = AVPlayerLayer()
+    // MARK: - 三个槽位
+    //
+    // 【必须是 class】struct 是值类型，`slots[i].layer.opacity = x` 会作用在副本上，
+    // 改动丢失 → 画面永远不出来。这个坑在前两版里没踩是因为当时用的是私有属性。
+    private final class Slot {
+        let player = AVPlayer()
+        let layer = AVPlayerLayer()
+        var videoID: String?
+        var url: String?
+        var statusObs: NSKeyValueObservation?
+        var readyObs: NSKeyValueObservation?
 
-    /// 哪个槽位当前是"台上"的（在播 / 待播的那条）
-    private var stagedIsA = true
+        init() {
+            layer.videoGravity = .resizeAspectFill
+            layer.opacity = 0
+            player.actionAtItemEnd = .pause
+            player.automaticallyWaitsToMinimizeStalling = true
+            player.isMuted = true
+            layer.player = player
+        }
+    }
 
-    private var currentPlayer: AVPlayer { stagedIsA ? playerA : playerB }
-    private var nextPlayer: AVPlayer { stagedIsA ? playerB : playerA }
-    private var currentLayer: AVPlayerLayer { stagedIsA ? layerA : layerB }
-    private var nextLayer: AVPlayerLayer { stagedIsA ? layerB : layerA }
+    private var slots: [Slot] = [Slot(), Slot(), Slot()]
+    /// 哪个槽位在台上（0/1/2 保持轮转）
+    private var currentIndex = 0
+    /// 下一条预留给哪个槽
+    private var nextIndex = 1
+    /// 上一条留在哪个槽
+    private var prevIndex = 2
 
-    /// 当前层 / 下一层各自对应的 video id
-    private var currentID: String?
-    private var nextID: String?
+    private var current: Slot { slots[currentIndex] }
+    private var next: Slot { slots[nextIndex] }
+    private var prev: Slot { slots[prevIndex] }
 
-    /// 前后缓冲（秒）。本地库给 3s 足够；太小会刚起播就卡。
-    private let forwardBufferSeconds: Double = 3.0
+    /// 前后缓冲（秒）。本地库给 5s：起播前缓冲足够，滑过去不会立刻 waiting。
+    private let forwardBufferSeconds: Double = 5.0
 
     private var progressTimer: Timer?
-    private var statusObs: NSKeyValueObservation?
     private var endObserver: NSObjectProtocol?
 
-    /// 当前条是否已经"真的有画面了"（用于去黑闪）
-    private var currentHasFrame = false
-
-    /// 用户"想播"的意图。readyToPlay 之后据此自动起播 —— 这是治"要点两下"的关键。
+    /// 用户"想播"的意图。ready 之后据此自动起播 —— 治"要点两下"。
     private var wantsPlay = true
+    /// 当前条连续失败次数（自愈用）
+    private var currentLoadFailures = 0
 
     // MARK: - 初始化
 
@@ -70,289 +98,356 @@ import UIKit
 
     private func setup() {
         backgroundColor = .black
-        // resizeAspectFill = 竖屏短视频的标准填充（黑边最少）
-        layerA.videoGravity = .resizeAspectFill
-        layerB.videoGravity = .resizeAspectFill
-        layerA.frame = bounds
-        layerB.frame = bounds
-        layerA.opacity = 0
-        layerB.opacity = 0
-        layer.addSublayer(layerA)
-        layer.addSublayer(layerB)
         // 这一层不吃触摸：手势全部交给上面的 WKWebView
         isUserInteractionEnabled = false
 
-        [playerA, playerB].forEach {
-            $0.actionAtItemEnd = .pause
-            $0.automaticallyWaitsToMinimizeStalling = true
-            $0.isMuted = true
+        for i in slots.indices {
+            let s = slots[i]
+            s.layer.frame = bounds
+            layer.addSublayer(s.layer)
+            observe(slotAt: i)
         }
-        layerA.player = playerA
-        layerB.player = playerB
 
-        observeCurrent()
+        endObserver = NotificationCenter.default.addObserver(
+            forName: .AVPlayerItemDidPlayToEndTime,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let self else { return }
+            guard let item = note.object as? AVPlayerItem,
+                  item === self.current.player.currentItem else { return }
+            self.onEnded?()
+        }
     }
 
     deinit {
-        teardown()
-    }
-
-    private func teardown() {
         progressTimer?.invalidate()
-        progressTimer = nil
-        statusObs?.invalidate()
-        statusObs = nil
-        if let o = endObserver {
-            NotificationCenter.default.removeObserver(o)
-            endObserver = nil
+        if let o = endObserver { NotificationCenter.default.removeObserver(o) }
+        for s in slots {
+            s.statusObs?.invalidate()
+            s.readyObs?.invalidate()
+            s.player.pause()
         }
-        playerA.pause()
-        playerB.pause()
     }
 
     public override func layoutSubviews() {
         super.layoutSubviews()
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        layerA.frame = bounds
-        layerB.frame = bounds
+        for s in slots { s.layer.frame = bounds }
         CATransaction.commit()
     }
 
-    // MARK: - 观察当前条状态
+    // MARK: - 槽位观察
 
-    private func observeCurrent() {
-        statusObs?.invalidate()
-        statusObs = nil
+    private func observe(slotAt i: Int) {
+        let s = slots[i]
+        s.statusObs?.invalidate()
+        s.readyObs?.invalidate()
 
-        let player = currentPlayer
-        statusObs = player.observe(\.currentItem?.status, options: [.new, .initial]) { [weak self] p, _ in
-            guard let self, p === self.currentPlayer else { return }
-            let status = p.currentItem?.status ?? .unknown
-            switch status {
+        // 【注意】槽位是环形轮转的，i 会换角色。
+        // 所以闭包里不能只信 i，必须用「这个槽位现在的 videoID 是不是台上的那条」来判断，
+        // 否则轮转瞬间旧观察者会误判，把不该显示的画面推上去。
+        //
+        // 捕获 list 用 [weak s]：Slot 持有 obs，obs 又捕获 Slot 会形成 cycle。
+        s.statusObs = s.player.observe(\.currentItem?.status, options: [.new]) { [weak self, weak s] p, _ in
+            guard let self, let s else { return }
+            guard self.isOnStage(i, id: s.videoID) else { return }
+            switch p.currentItem?.status {
             case .readyToPlay:
-                self.markCurrentReady()
-                // 想播就自动播 —— 用户不该为了"开始"点第二下
-                if self.wantsPlay && p.rate == 0 {
-                    p.play()
-                    self.emitState(["phase": "playing", "id": self.currentID ?? ""])
-                    self.startProgressTimer()
-                }
+                self.currentLoadFailures = 0
+                // 想播就播。此时 layer 可能还没画面，readyObs 负责切不透明度。
+                self.tryAutoStart()
             case .failed:
-                self.onError?(p.currentItem?.error?.localizedDescription ?? "播放失败")
-                self.emitState(["phase": "error"])
+                self.currentLoadFailures += 1
+                let msg = p.currentItem?.error?.localizedDescription ?? "播放失败"
+                if self.currentLoadFailures <= 2, let u = s.url, let url = URL(string: u) {
+                    self.emitState(["phase": "retry", "id": s.videoID ?? "", "attempt": self.currentLoadFailures])
+                    s.player.replaceCurrentItem(with: self.makeItem(url: url))
+                    self.observe(slotAt: self.currentIndex)
+                } else {
+                    self.onError?(msg)
+                    self.emitState(["phase": "error", "id": s.videoID ?? "", "message": msg])
+                }
             default:
                 break
             }
         }
 
-        if endObserver == nil {
-            endObserver = NotificationCenter.default.addObserver(
-                forName: .AVPlayerItemDidPlayToEndTime,
-                object: nil,
-                queue: .main
-            ) { [weak self] note in
-                guard let self else { return }
-                guard let item = note.object as? AVPlayerItem,
-                      item === self.currentPlayer.currentItem else { return }
-                self.onEnded?()
-            }
+        // 真正"有画面了"的信号：AVPlayerLayer.isReadyForDisplay
+        // status==readyToPlay 只说明能播，画面未必解出来了。
+        s.readyObs = s.layer.observe(\.isReadyForDisplay, options: [.new, .initial]) { [weak self, weak s] l, _ in
+            guard let self, let s else { return }
+            guard l.isReadyForDisplay else { return }
+            guard self.isOnStage(i, id: s.videoID) else { return }
+            self.revealCurrent()
         }
     }
 
-    private func markCurrentReady() {
-        guard !currentHasFrame else { return }
-        currentHasFrame = true
+    /// 这个槽位此刻是不是「台上的当前条」
+    private func isOnStage(_ index: Int, id: String?) -> Bool {
+        guard index == currentIndex else { return false }
+        guard let id else { return false }
+        return slots[currentIndex].videoID == id
+    }
+
+    private func revealCurrent() {
+        guard slots[currentIndex].layer.opacity != 1 else { return }
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        currentLayer.opacity = 1
-        nextLayer.opacity = 0
+        for (i, s) in slots.enumerated() {
+            s.layer.opacity = (i == currentIndex) ? 1 : 0
+        }
         CATransaction.commit()
-        emitState(["phase": "ready", "id": currentID ?? ""])
+        emitState(["phase": "ready", "id": current.videoID ?? ""])
     }
 
-    // MARK: - 核心 API（供 Bridge 调用）
-
-    /// 一次性把队列交给原生：当前条 + 下一条 URL。
-    @objc public func load(current id: String, url: String, next nextID: String?, nextURL: String?) {
-        guard let u = URL(string: url) else {
-            onError?("非法 URL: \(url)")
-            return
+    private func tryAutoStart() {
+        guard wantsPlay else { return }
+        guard current.player.currentItem?.status == .readyToPlay else { return }
+        if current.player.rate == 0 {
+            current.player.play()
+            emitState(["phase": "playing", "id": current.videoID ?? ""])
+            startProgressTimer()
         }
-        // 同一条不重复加载（避免每次 progress 都重建播放器）
-        if currentID == id, currentPlayer.currentItem != nil {
-            if let nextID, let nextURL, let nu = URL(string: nextURL), self.nextID != nextID {
-                prepareNext(id: nextID, url: nu)
-            }
-            return
-        }
-
-        currentID = id
-        currentHasFrame = false
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        currentLayer.opacity = 0
-        CATransaction.commit()
-
-        currentPlayer.replaceCurrentItem(with: makeItem(url: u))
-        observeCurrent()
-        if let nextID, let nextURL, let nu = URL(string: nextURL) {
-            prepareNext(id: nextID, url: nu)
-        } else {
-            clearNext()
-        }
-
-        emitState(["phase": "loading", "id": id])
     }
 
-    /// replace 包装：同步把位置归零，避免沿用上一条的播放点
-    private func setItem(_ player: AVPlayer, _ item: AVPlayerItem) {
-        player.replaceCurrentItem(with: item)
-    }
-
-    private func prepareNext(id: String, url: URL) {
-        guard nextID != id else { return }
-        nextID = id
-        setItem(nextPlayer, makeItem(url: url))
-        // 预加载：等它到 readyToPlay，但**不播**，并停在第一帧（0s）
-        nextPlayer.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
-    }
-
-    private func clearNext() {
-        nextID = nil
-        nextPlayer.replaceCurrentItem(with: nil)
-    }
+    // MARK: - 构造 item
 
     private func makeItem(url: URL) -> AVPlayerItem {
         let asset = AVURLAsset(url: url, options: [
             AVURLAssetPreferPreciseDurationAndTimingKey: false
         ])
         let item = AVPlayerItem(asset: asset)
+        // 关键：本地库单条几十 MB，缓冲给足，别让起播就 waiting
         item.preferredForwardBufferDuration = forwardBufferSeconds
+        item.canUseNetworkResourcesForLiveStreamingWhilePaused = true
         return item
     }
 
-    /// 切到下一条。
-    ///
-    /// 不做 replaceCurrentItem（那会丢掉缓冲、重新 seek、重新起播 → 黑屏 + 卡）。
-    /// 而是**交换两个槽位的角色**：预加载好的那个 player 直接变成"台上"，
-    /// 只翻两个 layer 的不透明度。整个过程没有解绑，是 0 帧黑屏。
-    @objc public func advanceToNext() -> Bool {
-        guard nextID != nil, nextPlayer.currentItem != nil else { return false }
+    private func setItem(_ slot: Slot, url: URL, id: String) {
+        slot.videoID = id
+        slot.url = url.absoluteString
+        slot.layer.opacity = 0
+        slot.player.replaceCurrentItem(with: makeItem(url: url))
+        // 预加载的槽也要停在 0s 并解出首帧，这样提上来立刻有画面
+        slot.player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
+    }
 
-        let oldPlayer = currentPlayer
-        let oldNextID = nextID
-        let oldCurrentID = currentID
+    // MARK: - 核心 API
 
-        oldPlayer.pause()
-
-        // 交换角色
-        stagedIsA.toggle()
-
-        currentID = oldNextID
-        nextID = nil
-        currentHasFrame = false
-
-        // 立刻把画面翻到新的一条（它已经在 0s 且 ready，可以直接显示首帧）
-        if currentPlayer.currentItem?.status == .readyToPlay {
-            markCurrentReady()
+    /// 一次性把队列交给原生：当前条 + 下一条（+ 上一条用于回滑）。
+    @objc public func load(current id: String, url: String, next nextID: String?, nextURL: String?, prev prevID: String?, prevURL: String?) {
+        guard let u = URL(string: url) else {
+            onError?("非法 URL: \(url)")
+            return
         }
-        observeCurrent()
 
-        // 旧的当前条清空，腾出槽位给"下下条"
-        oldPlayer.replaceCurrentItem(with: nil)
+        // 同一条不重建（避免每次同步都重载）
+        if current.videoID == id, current.player.currentItem != nil {
+            if let nextID, let nextURL, let nu = URL(string: nextURL), next.videoID != nextID {
+                setItem(next, url: nu, id: nextID)
+            }
+            if let prevID, let prevURL, let pu = URL(string: prevURL), prev.videoID != prevID {
+                setItem(prev, url: pu, id: prevID)
+            }
+            return
+        }
 
-        emitState(["phase": "loading", "id": currentID ?? "", "from": oldCurrentID ?? ""])
+        currentLoadFailures = 0
+        setItem(current, url: u, id: id)
+        observe(slotAt: currentIndex)
+
+        if let nextID, let nextURL, let nu = URL(string: nextURL) {
+            setItem(next, url: nu, id: nextID)
+        } else if next.videoID != nil {
+            clear(next)
+        }
+
+        if let prevID, let prevURL, let pu = URL(string: prevURL) {
+            setItem(prev, url: pu, id: prevID)
+        } else if prev.videoID != nil {
+            clear(prev)
+        }
+
+        emitState(["phase": "loading", "id": id])
+        tryAutoStart()
+    }
+
+    private func clear(_ slot: Slot) {
+        slot.videoID = nil
+        slot.url = nil
+        slot.layer.opacity = 0
+        slot.player.replaceCurrentItem(with: nil)
+    }
+
+    /// 往下滑一条：preloaded 的 next 直接上台，**不重建、不 rebuffer**。
+    ///
+    /// 做法是轮转三个槽位的角色，而不是搬运 item：
+    ///   旧 prev → 还给池子（清空）
+    ///   旧 current → 成为新 prev
+    ///   旧 next → 成为新 current（它已经 ready 且画面解好了）
+    ///   池子 → 成为新 next（等 JS 告诉它下一条是谁）
+    @objc public func advanceDown() -> Bool {
+        guard next.videoID != nil else { return false }
+
+        current.player.pause()
+
+        // 轮转
+        let oldPrev = prevIndex
+        prevIndex = currentIndex
+        currentIndex = nextIndex
+        nextIndex = oldPrev
+
+        clear(slots[nextIndex])   // 腾出槽位给"下下条"
+        currentLoadFailures = 0
+
+        // 新 current 如果画面已就绪，立刻上台（0 帧黑屏）；
+        // 否则等 readyObs 回调。
+        observe(slotAt: currentIndex)
+        if slots[currentIndex].layer.isReadyForDisplay {
+            revealCurrent()
+        }
+        tryAutoStart()
+
+        emitState(["phase": "advanced", "id": current.videoID ?? "", "dir": "down"])
         return true
     }
 
-    /// 交给我们"下一个要预加载谁"
-    @objc public func preloadNext(id: String?, url: String?) {
-        guard let id, let url, let u = URL(string: url) else {
-            clearNext()
-            return
+    /// 往上滑一条：preloaded 的 prev 上台（复用同一套轮转）。
+    @objc public func advanceUp() -> Bool {
+        guard prev.videoID != nil else { return false }
+
+        current.player.pause()
+
+        let oldNext = nextIndex
+        nextIndex = currentIndex
+        currentIndex = prevIndex
+        prevIndex = oldNext
+
+        clear(slots[prevIndex])
+        currentLoadFailures = 0
+
+        observe(slotAt: currentIndex)
+        if slots[currentIndex].layer.isReadyForDisplay {
+            revealCurrent()
         }
-        prepareNext(id: id, url: u)
+        tryAutoStart()
+
+        emitState(["phase": "advanced", "id": current.videoID ?? "", "dir": "up"])
+        return true
+    }
+
+    /// 滑动过程中临时停一下，但**不改变 wantsPlay 意图** ——
+    /// 落位后自己会接上，不需要用户再点。
+    @objc public func hold() {
+        current.player.pause()
+        stopProgressTimer()
+        emitState(["phase": "holding", "id": current.videoID ?? ""])
     }
 
     @objc public func play() {
         wantsPlay = true
-        if currentPlayer.currentItem?.status == .readyToPlay {
-            currentPlayer.play()
-            emitState(["phase": "playing", "id": currentID ?? ""])
+        if current.player.currentItem?.status == .readyToPlay {
+            current.player.play()
+            emitState(["phase": "playing", "id": current.videoID ?? ""])
             startProgressTimer()
         } else {
-            // 还没就绪：记下意图，ready 回调里自动起播
-            emitState(["phase": "waiting", "id": currentID ?? ""])
+            // 数据没到：记住意图，ready 后自动播（这就是"不用点第二下"的关键）
+            emitState(["phase": "wantplay", "id": current.videoID ?? ""])
         }
     }
 
     @objc public func pause() {
         wantsPlay = false
-        currentPlayer.pause()
-        emitState(["phase": "paused", "id": currentID ?? ""])
+        current.player.pause()
+        emitState(["phase": "paused", "id": current.videoID ?? ""])
         stopProgressTimer()
-    }
-
-    /// 只暂停，不改"想播"意图 —— 用于滑动过程中的临时停，
-    /// 落位后能自己接上，不需要用户再点两下。
-    @objc public func hold() {
-        currentPlayer.pause()
-        stopProgressTimer()
-        emitState(["phase": "holding", "id": currentID ?? ""])
     }
 
     @objc public func setMuted(_ muted: Bool) {
-        currentPlayer.isMuted = muted
-        nextPlayer.isMuted = true
+        current.player.isMuted = muted
+        next.player.isMuted = true
+        prev.player.isMuted = true
         emitState(["phase": "muted", "muted": muted])
     }
 
     @objc public func seek(seconds: Double) {
         guard seconds > 0.05 else { return }
-        let t = CMTime(seconds: max(0, seconds), preferredTimescale: 600)
-        currentPlayer.seek(to: t, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+        let t = CMTime(seconds: seconds, preferredTimescale: 600)
+        current.player.seek(to: t, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
             self?.emitState(["phase": "seeked"])
         }
     }
 
-    @objc public func setRate(_ rate: Float) {
-        if currentPlayer.currentItem?.status == .readyToPlay {
-            currentPlayer.rate = rate
+    @objc public func replay() {
+        current.player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+            self?.play()
         }
     }
 
-    /// 当前是不是"台上那条在跑"
-    @objc public var isPlaying: Bool {
-        return currentPlayer.rate > 0 && currentPlayer.error == nil
+    @objc public var currentVideoID: String? { current.videoID }
+    @objc public var isPlaying: Bool { current.player.rate > 0 && current.player.error == nil }
+
+    /// 诊断用：三个槽位分别是什么
+    @objc public func debugSnapshot() -> [String: Any] {
+        var out: [String: Any] = [
+            "currentIndex": currentIndex,
+            "nextIndex": nextIndex,
+            "prevIndex": prevIndex,
+            "wantsPlay": wantsPlay,
+            "rate": Double(current.player.rate)
+        ]
+        for (i, s) in slots.enumerated() {
+            out["slot\(i)"] = [
+                "id": s.videoID ?? "-",
+                "opacity": Double(s.layer.opacity),
+                "readyForDisplay": s.layer.isReadyForDisplay,
+                "status": statusString(s.player.currentItem?.status),
+                "buffered": bufferedSeconds(s.player)
+            ] as [String: Any]
+        }
+        return out
     }
 
-    @objc public var playingID: String? { currentID }
+    private func statusString(_ s: AVPlayerItem.Status?) -> String {
+        switch s {
+        case .readyToPlay: return "ready"
+        case .failed: return "failed"
+        case .unknown: return "unknown"
+        default: return "none"
+        }
+    }
 
-    // MARK: - 进度上报
+    private func bufferedSeconds(_ p: AVPlayer) -> Double {
+        guard let item = p.currentItem else { return 0 }
+        let pos = CMTimeGetSeconds(p.currentTime())
+        let end = item.loadedTimeRanges
+            .map { CMTimeGetSeconds($0.timeRangeValue.start + $0.timeRangeValue.duration) }
+            .max() ?? 0
+        let v = end - pos
+        return v.isFinite && v > 0 ? v : 0
+    }
+
+    // MARK: - 进度
 
     private func startProgressTimer() {
         guard progressTimer == nil else { return }
-        progressTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            guard let item = self.currentPlayer.currentItem else { return }
-            let pos = CMTimeGetSeconds(self.currentPlayer.currentTime())
+        let t = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+            guard let self, let item = self.current.player.currentItem else { return }
+            let pos = CMTimeGetSeconds(self.current.player.currentTime())
             guard pos.isFinite else { return }
             let dur = CMTimeGetSeconds(item.duration)
-            let loaded = item.loadedTimeRanges
-                .map { CMTimeGetSeconds($0.timeRangeValue.start + $0.timeRangeValue.duration) }
-                .max() ?? 0
             self.onProgress?([
-                "id": self.currentID ?? "",
+                "id": self.current.videoID ?? "",
                 "position": pos,
                 "duration": dur.isFinite ? dur : 0,
-                "buffered": loaded.isFinite ? loaded : 0,
-                "playing": self.currentPlayer.rate > 0
+                "buffered": self.bufferedSeconds(self.current.player),
+                "playing": self.current.player.rate > 0
             ])
         }
-        if let t = progressTimer {
-            RunLoop.main.add(t, forMode: .common)
-        }
+        RunLoop.main.add(t, forMode: .common)
+        progressTimer = t
     }
 
     private func stopProgressTimer() {
