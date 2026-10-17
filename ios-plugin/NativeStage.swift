@@ -69,9 +69,11 @@ import UIKit
     /// 上一条留在哪个槽
     private var prevIndex = 2
 
-    private var current: Slot { slots[currentIndex] }
-    private var next: Slot { slots[nextIndex] }
-    private var prev: Slot { slots[prevIndex] }
+    // 【命名注意】不能叫 next / prev —— UIResponder 已经有 `next: UIResponder?`，
+    // 会报 "property 'next' cannot override a property with type 'UIResponder?'"。
+    private var curSlot: Slot { slots[currentIndex] }
+    private var nextSlot: Slot { slots[nextIndex] }
+    private var prevSlot: Slot { slots[prevIndex] }
 
     /// 前后缓冲（秒）。本地库给 5s：起播前缓冲足够，滑过去不会立刻 waiting。
     private let forwardBufferSeconds: Double = 5.0
@@ -115,7 +117,7 @@ import UIKit
         ) { [weak self] note in
             guard let self else { return }
             guard let item = note.object as? AVPlayerItem,
-                  item === self.current.player.currentItem else { return }
+                  item === self.curSlot.player.currentItem else { return }
             self.onEnded?()
         }
     }
@@ -199,15 +201,15 @@ import UIKit
             s.layer.opacity = (i == currentIndex) ? 1 : 0
         }
         CATransaction.commit()
-        emitState(["phase": "ready", "id": current.videoID ?? ""])
+        emitState(["phase": "ready", "id": curSlot.videoID ?? ""])
     }
 
     private func tryAutoStart() {
         guard wantsPlay else { return }
-        guard current.player.currentItem?.status == .readyToPlay else { return }
-        if current.player.rate == 0 {
-            current.player.play()
-            emitState(["phase": "playing", "id": current.videoID ?? ""])
+        guard curSlot.player.currentItem?.status == .readyToPlay else { return }
+        if curSlot.player.rate == 0 {
+            curSlot.player.play()
+            emitState(["phase": "playing", "id": curSlot.videoID ?? ""])
             startProgressTimer()
         }
     }
@@ -244,12 +246,12 @@ import UIKit
         }
 
         // 同一条不重建（避免每次同步都重载）
-        if current.videoID == id, current.player.currentItem != nil {
-            if let nextID, let nextURL, let nu = URL(string: nextURL), next.videoID != nextID {
-                setItem(next, url: nu, id: nextID)
+        if curSlot.videoID == id, curSlot.player.currentItem != nil {
+            if let nextID, let nextURL, let nu = URL(string: nextURL), nextSlot.videoID != nextID {
+                setItem(nextSlot, url: nu, id: nextID)
             }
-            if let prevID, let prevURL, let pu = URL(string: prevURL), prev.videoID != prevID {
-                setItem(prev, url: pu, id: prevID)
+            if let prevID, let prevURL, let pu = URL(string: prevURL), prevSlot.videoID != prevID {
+                setItem(prevSlot, url: pu, id: prevID)
             }
             return
         }
@@ -259,15 +261,15 @@ import UIKit
         observe(slotAt: currentIndex)
 
         if let nextID, let nextURL, let nu = URL(string: nextURL) {
-            setItem(next, url: nu, id: nextID)
-        } else if next.videoID != nil {
-            clear(next)
+            setItem(nextSlot, url: nu, id: nextID)
+        } else if nextSlot.videoID != nil {
+            clear(nextSlot)
         }
 
         if let prevID, let prevURL, let pu = URL(string: prevURL) {
-            setItem(prev, url: pu, id: prevID)
-        } else if prev.videoID != nil {
-            clear(prev)
+            setItem(prevSlot, url: pu, id: prevID)
+        } else if prevSlot.videoID != nil {
+            clear(prevSlot)
         }
 
         emitState(["phase": "loading", "id": id])
@@ -289,9 +291,9 @@ import UIKit
     ///   旧 next → 成为新 current（它已经 ready 且画面解好了）
     ///   池子 → 成为新 next（等 JS 告诉它下一条是谁）
     @objc public func advanceDown() -> Bool {
-        guard next.videoID != nil else { return false }
+        guard nextSlot.videoID != nil else { return false }
 
-        current.player.pause()
+        curSlot.player.pause()
 
         // 轮转
         let oldPrev = prevIndex
@@ -310,15 +312,15 @@ import UIKit
         }
         tryAutoStart()
 
-        emitState(["phase": "advanced", "id": current.videoID ?? "", "dir": "down"])
+        emitState(["phase": "advanced", "id": curSlot.videoID ?? "", "dir": "down"])
         return true
     }
 
     /// 往上滑一条：preloaded 的 prev 上台（复用同一套轮转）。
     @objc public func advanceUp() -> Bool {
-        guard prev.videoID != nil else { return false }
+        guard prevSlot.videoID != nil else { return false }
 
-        current.player.pause()
+        curSlot.player.pause()
 
         let oldNext = nextIndex
         nextIndex = currentIndex
@@ -334,60 +336,60 @@ import UIKit
         }
         tryAutoStart()
 
-        emitState(["phase": "advanced", "id": current.videoID ?? "", "dir": "up"])
+        emitState(["phase": "advanced", "id": curSlot.videoID ?? "", "dir": "up"])
         return true
     }
 
     /// 滑动过程中临时停一下，但**不改变 wantsPlay 意图** ——
     /// 落位后自己会接上，不需要用户再点。
     @objc public func hold() {
-        current.player.pause()
+        curSlot.player.pause()
         stopProgressTimer()
-        emitState(["phase": "holding", "id": current.videoID ?? ""])
+        emitState(["phase": "holding", "id": curSlot.videoID ?? ""])
     }
 
     @objc public func play() {
         wantsPlay = true
-        if current.player.currentItem?.status == .readyToPlay {
-            current.player.play()
-            emitState(["phase": "playing", "id": current.videoID ?? ""])
+        if curSlot.player.currentItem?.status == .readyToPlay {
+            curSlot.player.play()
+            emitState(["phase": "playing", "id": curSlot.videoID ?? ""])
             startProgressTimer()
         } else {
             // 数据没到：记住意图，ready 后自动播（这就是"不用点第二下"的关键）
-            emitState(["phase": "wantplay", "id": current.videoID ?? ""])
+            emitState(["phase": "wantplay", "id": curSlot.videoID ?? ""])
         }
     }
 
     @objc public func pause() {
         wantsPlay = false
-        current.player.pause()
-        emitState(["phase": "paused", "id": current.videoID ?? ""])
+        curSlot.player.pause()
+        emitState(["phase": "paused", "id": curSlot.videoID ?? ""])
         stopProgressTimer()
     }
 
     @objc public func setMuted(_ muted: Bool) {
-        current.player.isMuted = muted
-        next.player.isMuted = true
-        prev.player.isMuted = true
+        curSlot.player.isMuted = muted
+        nextSlot.player.isMuted = true
+        prevSlot.player.isMuted = true
         emitState(["phase": "muted", "muted": muted])
     }
 
     @objc public func seek(seconds: Double) {
         guard seconds > 0.05 else { return }
         let t = CMTime(seconds: seconds, preferredTimescale: 600)
-        current.player.seek(to: t, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+        curSlot.player.seek(to: t, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
             self?.emitState(["phase": "seeked"])
         }
     }
 
     @objc public func replay() {
-        current.player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+        curSlot.player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
             self?.play()
         }
     }
 
-    @objc public var currentVideoID: String? { current.videoID }
-    @objc public var isPlaying: Bool { current.player.rate > 0 && current.player.error == nil }
+    @objc public var currentVideoID: String? { curSlot.videoID }
+    @objc public var isPlaying: Bool { curSlot.player.rate > 0 && curSlot.player.error == nil }
 
     /// 诊断用：三个槽位分别是什么
     @objc public func debugSnapshot() -> [String: Any] {
@@ -396,7 +398,7 @@ import UIKit
             "nextIndex": nextIndex,
             "prevIndex": prevIndex,
             "wantsPlay": wantsPlay,
-            "rate": Double(current.player.rate)
+            "rate": Double(curSlot.player.rate)
         ]
         for (i, s) in slots.enumerated() {
             out["slot\(i)"] = [
@@ -434,16 +436,16 @@ import UIKit
     private func startProgressTimer() {
         guard progressTimer == nil else { return }
         let t = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
-            guard let self, let item = self.current.player.currentItem else { return }
-            let pos = CMTimeGetSeconds(self.current.player.currentTime())
+            guard let self, let item = self.curSlot.player.currentItem else { return }
+            let pos = CMTimeGetSeconds(self.curSlot.player.currentTime())
             guard pos.isFinite else { return }
             let dur = CMTimeGetSeconds(item.duration)
             self.onProgress?([
-                "id": self.current.videoID ?? "",
+                "id": self.curSlot.videoID ?? "",
                 "position": pos,
                 "duration": dur.isFinite ? dur : 0,
-                "buffered": self.bufferedSeconds(self.current.player),
-                "playing": self.current.player.rate > 0
+                "buffered": self.bufferedSeconds(self.curSlot.player),
+                "playing": self.curSlot.player.rate > 0
             ])
         }
         RunLoop.main.add(t, forMode: .common)
