@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 /// 一条视频（对应服务端 /api/videos 的 items[]）
 struct VideoItem: Decodable, Equatable {
@@ -52,6 +53,13 @@ struct VideoItem: Decodable, Equatable {
         if n >= 10000 { return String(format: "%.1f万", Double(n) / 10000) }
         if n > 0 { return "\(n)" }
         return "点赞"
+    }
+
+    /// 宽高比（宽/高）。竖屏视频 < 1，用来决定 resizeAspectFill 还是 resizeAspect。
+    var aspect: CGFloat {
+        if let a = aspectRatio, a > 0.1, a < 10 { return CGFloat(a) }
+        if let w = width, let h = height, w > 0, h > 0 { return CGFloat(w) / CGFloat(h) }
+        return 9.0 / 16.0
     }
 }
 

@@ -1,55 +1,50 @@
 import AVFoundation
 import UIKit
 
-/// 原生竖屏 feed（第 3 步：接上 AVPlayer 播放）。
+/// 竖屏 feed 主容器。
 ///
-/// 结构：
-///   UICollectionView（竖向分页）
-///     └─ FeedCardCell（首帧图 + videoHost + 文字）
-///          └─ videoHost ← VideoPool 把 AVPlayerLayer 挂进来
+/// 移植自 dks333/Tiktok-Clone 的 HomeViewController（★430，MIT）。
+/// 原版用 UITableView + isPagingEnabled + 每个 cell 自持播放器，
+/// 这套结构简单且被验证能跑，所以照搬。
 ///
-/// 关键点：
-///   · 播放器在池子里，cell 只提供挂载点 —— cell 复用不影响播放
-///   · 滚动时判断当前是第几条，把池子对准它
-///   · 快速滑动 → setScrubbing(true)，只暂停，不解码
-///   · 停稳 0.2s → 起播
+/// 关键时序（原版的设计，很重要）：
+///   willDisplay      → cell.pause()     新 cell 出来先不动
+///   didEndDisplaying → cell.pause()     划走的暂停
+///   松手停稳后       → cell.replay()    这时才开始播
+/// 这样滑动过程中不会来回启停，是顺滑的根本。
 final class FeedViewController: UIViewController {
 
     private var items: [VideoItem] = []
     private var isLoading = false
     private var reachedEnd = false
+    private var currentIndex = 0
 
-    private let pool = VideoPool()
-    private var currentIndex = -1
-
-    private lazy var collectionView: UICollectionView = {
-        let layout = UICollectionViewFlowLayout()
-        layout.scrollDirection = .vertical
-        layout.minimumLineSpacing = 0
-        layout.minimumInteritemSpacing = 0
-        let cv = UICollectionView(frame: .zero, collectionViewLayout: layout)
-        cv.isPagingEnabled = true
-        cv.showsVerticalScrollIndicator = false
-        cv.contentInsetAdjustmentBehavior = .never
-        cv.backgroundColor = .black
-        cv.dataSource = self
-        cv.delegate = self
-        cv.register(FeedCardCell.self, forCellWithReuseIdentifier: "card")
-        cv.translatesAutoresizingMaskIntoConstraints = false
-        return cv
+    private lazy var tableView: UITableView = {
+        let tv = UITableView(frame: .zero, style: .plain)
+        tv.backgroundColor = .black
+        tv.isPagingEnabled = true
+        tv.contentInsetAdjustmentBehavior = .never
+        tv.showsVerticalScrollIndicator = false
+        tv.separatorStyle = .none
+        tv.tableFooterView = UIView()
+        tv.rowHeight = 0
+        tv.estimatedRowHeight = 0
+        tv.dataSource = self
+        tv.delegate = self
+        tv.register(FeedCardCell.self, forCellReuseIdentifier: FeedCardCell.reuseID)
+        tv.translatesAutoresizingMaskIntoConstraints = false
+        return tv
     }()
 
-    private let statusLabel = UILabel()
     private let spinner = UIActivityIndicatorView(style: .large)
+    private let statusLabel = UILabel()
     private let setupButton = UIButton(type: .custom)
-    private let debugLabel = UILabel()
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
+        setAudioSession()
         buildUI()
-        wirePool()
-
         if FeedService.shared.hasBase {
             loadMore()
         } else {
@@ -57,33 +52,42 @@ final class FeedViewController: UIViewController {
         }
     }
 
-    override func viewDidAppear(_ animated: Bool) {
-        super.viewDidAppear(animated)
-        // 上屏后如果已经有数据，把池子对准第 0 条
-        if !items.isEmpty, pool.current.videoID == nil {
-            syncPool(to: 0, scrubbing: false)
-        }
-        if pool.wantsPlay { pool.play() }
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        visibleCell()?.play()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        pool.pause()
+        visibleCell()?.pause()
     }
 
     override var prefersStatusBarHidden: Bool { false }
     override var preferredStatusBarStyle: UIStatusBarStyle { .lightContent }
 
+    private func setAudioSession() {
+        do {
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+            try AVAudioSession.sharedInstance().setActive(true)
+        } catch {
+            print("[dzc] audio session: \(error)")
+        }
+    }
+
     // MARK: - UI
 
     private func buildUI() {
-        view.addSubview(collectionView)
+        view.addSubview(tableView)
         NSLayoutConstraint.activate([
-            collectionView.topAnchor.constraint(equalTo: view.topAnchor),
-            collectionView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            collectionView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            collectionView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            tableView.topAnchor.constraint(equalTo: view.topAnchor),
+            tableView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            tableView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
+
+        spinner.color = .white
+        spinner.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(spinner)
 
         statusLabel.textColor = .white
         statusLabel.font = .systemFont(ofSize: 15)
@@ -91,10 +95,6 @@ final class FeedViewController: UIViewController {
         statusLabel.numberOfLines = 0
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(statusLabel)
-
-        spinner.color = .white
-        spinner.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(spinner)
 
         setupButton.setTitle("设置服务器地址", for: .normal)
         setupButton.setTitleColor(.white, for: .normal)
@@ -106,306 +106,156 @@ final class FeedViewController: UIViewController {
         setupButton.addTarget(self, action: #selector(openSetup), for: .touchUpInside)
         view.addSubview(setupButton)
 
-        // 左下角诊断：三击切换显示
-        debugLabel.textColor = UIColor(red: 0.3, green: 1, blue: 0.5, alpha: 1)
-        debugLabel.backgroundColor = UIColor(white: 0, alpha: 0.72)
-        debugLabel.font = UIFont(name: "Menlo", size: 9) ?? .systemFont(ofSize: 9)
-        debugLabel.numberOfLines = 8
-        debugLabel.isHidden = true
-        debugLabel.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(debugLabel)
-
         NSLayoutConstraint.activate([
             spinner.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             spinner.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-
             statusLabel.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             statusLabel.centerYAnchor.constraint(equalTo: view.centerYAnchor, constant: 44),
             statusLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 32),
             statusLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -32),
-
             setupButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             setupButton.centerYAnchor.constraint(equalTo: view.centerYAnchor, constant: 44),
             setupButton.widthAnchor.constraint(equalToConstant: 200),
             setupButton.heightAnchor.constraint(equalToConstant: 46),
-
-            debugLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 8),
-            debugLabel.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -8),
-            debugLabel.widthAnchor.constraint(equalToConstant: 280),
         ])
-
-        // 诊断按钮：放在最上层，不跟 collectionView 抢手势
-        let dbgBtn = UIButton(type: .custom)
-        dbgBtn.setTitle("诊断", for: .normal)
-        dbgBtn.setTitleColor(.white, for: .normal)
-        dbgBtn.titleLabel?.font = .systemFont(ofSize: 11, weight: .medium)
-        dbgBtn.backgroundColor = UIColor(red: 0, green: 0.5, blue: 0.2, alpha: 0.85)
-        dbgBtn.layer.cornerRadius = 11
-        dbgBtn.translatesAutoresizingMaskIntoConstraints = false
-        dbgBtn.addTarget(self, action: #selector(toggleDebug), for: .touchUpInside)
-        view.addSubview(dbgBtn)
-
-        // 单击暂停/播放挂在 collectionView 上（这是短视频的标准交互）
-        let tap1 = UITapGestureRecognizer(target: self, action: #selector(handleTap))
-        collectionView.addGestureRecognizer(tap1)
-
-        NSLayoutConstraint.activate([
-            dbgBtn.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-            dbgBtn.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
-            dbgBtn.widthAnchor.constraint(equalToConstant: 56),
-            dbgBtn.heightAnchor.constraint(equalToConstant: 22),
-        ])
-
-        // 先默认显示，方便你第一眼就能看到状态
-        debugLabel.isHidden = false
-
-        // 诊断刷新
-        Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in
-            guard let self, !self.debugLabel.isHidden else { return }
-            self.debugLabel.text = self.pool.debugInfo()
-        }
     }
 
-    @objc private func handleTap() {
-        pool.toggle()
-        if pool.current.player.rate > 0 {
-            visibleCell()?.setPlaying(true)
-        } else {
-            visibleCell()?.setPlaying(false)
-        }
+    private func setStatus(_ t: String, spin: Bool = false, button: Bool = false) {
+        statusLabel.text = t
+        statusLabel.isHidden = t.isEmpty
+        setupButton.isHidden = !button
+        spinner.isHidden = !spin
+        if spin { spinner.startAnimating() } else { spinner.stopAnimating() }
     }
 
-    @objc private func toggleDebug() {
-        debugLabel.isHidden = !debugLabel.isHidden
-    }
-
-    private func setStatus(_ text: String, showSpinner: Bool = false, showButton: Bool = false) {
-        statusLabel.text = text
-        statusLabel.isHidden = text.isEmpty
-        setupButton.isHidden = !showButton
-        spinner.isHidden = !showSpinner
-        if showSpinner { spinner.startAnimating() } else { spinner.stopAnimating() }
-    }
-
-    // MARK: - 池子事件
-
-    private func wirePool() {
-        pool.onReady = { [weak self] id in
-            guard let self, let cell = self.cellForVideo(id) else { return }
-            cell.setNativeVisible(true)
-            cell.clearError()
-        }
-        pool.onPlaying = { [weak self] id in
-            self?.cellForVideo(id)?.setPlaying(true)
-        }
-        pool.onPaused = { [weak self] id in
-            self?.cellForVideo(id)?.setPlaying(false)
-        }
-        pool.onError = { [weak self] id, msg in
-            guard let self, let cell = self.cellForVideo(id) else { return }
-            cell.showError("播放失败\n" + msg)
-        }
-    }
-
-    /// 找到某条视频对应的可见 cell
-    private func cellForVideo(_ id: Int) -> FeedCardCell? {
-        guard let idx = items.firstIndex(where: { $0.id == id }) else { return nil }
-        return collectionView.cellForItem(at: IndexPath(item: idx, section: 0)) as? FeedCardCell
-    }
-
-    private func visibleCell() -> FeedCardCell? {
-        for case let c as FeedCardCell in collectionView.visibleCells {
-            if c.window != nil { return c }
-        }
-        return nil
-    }
-
-    // MARK: - 设置地址
+    // MARK: - 数据
 
     private func showSetup() {
-        setStatus("需要先设置服务器地址\n例如 http://192.168.1.10:6688\n或 https://locvid-pc.tail83739b.ts.net:8445",
-                  showSpinner: false, showButton: true)
+        setStatus("需要先设置服务器地址\n例如 http://192.168.1.10:6688",
+                  spin: false, button: true)
     }
 
     @objc private func openSetup() {
-        let alert = UIAlertController(title: "服务器地址",
-                                      message: "必须带 http:// 或 https://",
-                                      preferredStyle: .alert)
-        alert.addTextField { tf in
+        let a = UIAlertController(title: "服务器地址",
+                                  message: "必须带 http:// 或 https://",
+                                  preferredStyle: .alert)
+        a.addTextField { tf in
             tf.placeholder = "http://..."
             tf.keyboardType = .URL
             tf.autocapitalizationType = .none
             tf.autocorrectionType = .no
             tf.text = FeedService.shared.base
         }
-        alert.addAction(UIAlertAction(title: "取消", style: .cancel))
-        alert.addAction(UIAlertAction(title: "保存", style: .default) { [weak self, weak alert] _ in
+        a.addAction(UIAlertAction(title: "取消", style: .cancel))
+        a.addAction(UIAlertAction(title: "保存", style: .default) { [weak self, weak a] _ in
             guard let self else { return }
-            let raw = alert?.textFields?.first?.text ?? ""
-            let v = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            let v = (a?.textFields?.first?.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             guard v.hasPrefix("http://") || v.hasPrefix("https://") else { return }
             FeedService.shared.base = v
-            self.setStatus("正在加载…", showSpinner: true)
+            self.setStatus("正在加载…", spin: true)
             self.loadMore()
         })
-        present(alert, animated: true)
+        present(a, animated: true)
     }
-
-    // MARK: - 数据
 
     private func loadMore() {
         guard !isLoading, !reachedEnd else { return }
         isLoading = true
-        if items.isEmpty { setStatus("正在加载…", showSpinner: true) }
+        if items.isEmpty { setStatus("正在加载…", spin: true) }
 
-        FeedService.shared.fetchPage(offset: items.count, limit: 20, sort: "random") { [weak self] result in
+        FeedService.shared.fetchPage(offset: items.count, limit: 10, sort: "random") { [weak self] r in
             guard let self else { return }
             self.isLoading = false
-            switch result {
+            switch r {
             case .success(let page):
                 if page.isEmpty {
                     self.reachedEnd = true
-                    if self.items.isEmpty { self.setStatus("服务器没有返回视频", showSpinner: false) }
+                    if self.items.isEmpty { self.setStatus("服务器没有返回视频") }
                     return
                 }
                 self.items.append(contentsOf: page)
                 self.setStatus("")
-                self.collectionView.reloadData()
-                FeedService.shared.prefetchFirstFrames(Array(page.prefix(6)))
-                // 数据到了，等一帧让 cell 上屏，再对池子
-                DispatchQueue.main.async {
-                    self.syncPool(to: max(0, self.currentIndex), scrubbing: false)
-                }
-            case .failure(let err):
-                self.setStatus("加载失败\n\(err.localizedDescription)", showSpinner: false, showButton: true)
+                self.tableView.reloadData()
+            case .failure(let e):
+                self.setStatus("加载失败\n\(e.localizedDescription)", button: true)
             }
         }
     }
 
-    // MARK: - 播放器同步
+    // MARK: - cell
 
-    private func syncPool(to index: Int, scrubbing: Bool) {
-        guard index >= 0, index < items.count else { return }
-        let base = FeedService.shared.base
-
-        // 尺寸没准备好之前不要动播放器（否则会拿到 0 尺寸的 layer）
-        guard collectionView.bounds.height > 1 else { return }
-
-        let cur = items[index]
-        guard let curURL = cur.streamURL(base) else { return }
-
-        var nextPair: (Int, URL)?
-        if index + 1 < items.count, let u = items[index + 1].streamURL(base) {
-            nextPair = (items[index + 1].id, u)
+    private func visibleCell() -> FeedCardCell? {
+        for c in tableView.visibleCells {
+            if let cell = c as? FeedCardCell { return cell }
         }
-
-        if pool.current.videoID == cur.id {
-            // 同一条：只同步邻条
-            pool.set(current: cur.id, url: curURL, next: nextPair)
-        } else {
-            pool.set(current: cur.id, url: curURL, next: nextPair)
-        }
-        pool.setScrubbing(scrubbing)
-
-        attachLayers()
-        pool.setMuted(false)
-
-        currentIndex = index
-        if index + 3 >= items.count { loadMore() }
+        return nil
     }
 
-    /// 把池里的两个 layer 挂到对应 cell 上
-    private func attachLayers() {
-        for case let cell as FeedCardCell in collectionView.visibleCells {
-            guard let ip = collectionView.indexPath(for: cell), ip.item < items.count else { continue }
-            let vid = items[ip.item].id
-
-            var target: AVPlayerLayer?
-            if pool.current.videoID == vid { target = pool.current.layer }
-            else if pool.standby.videoID == vid { target = pool.standby.layer }
-
-            guard let layer = target else { continue }
-
-            // 从原父层摘掉，避免一个 layer 同时挂在两个 cell 上
-            if let old = layer.superlayer, old !== cell.videoHost.layer {
-                layer.removeFromSuperlayer()
-            }
-            if layer.superlayer !== cell.videoHost.layer {
-                cell.videoHost.layer.addSublayer(layer)
-            }
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            layer.frame = cell.videoHost.bounds
-            cell.videoHost.layoutIfNeeded()
-            layer.frame = cell.videoHost.bounds
-            CATransaction.commit()
-
-            cell.setNativeVisible(layer.opacity > 0.5 && layer.isReadyForDisplay)
-        }
+    private func cellAt(_ row: Int) -> FeedCardCell? {
+        tableView.cellForRow(at: IndexPath(row: row, section: 0)) as? FeedCardCell
     }
 }
 
-extension FeedViewController: UICollectionViewDataSource, UICollectionViewDelegateFlowLayout {
+// MARK: - UITableView
 
-    func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int) -> Int {
+extension FeedViewController: UITableViewDataSource, UITableViewDelegate {
+
+    func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
         items.count
     }
 
-    func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
-        guard let cell = collectionView.dequeueReusableCell(withReuseIdentifier: "card", for: indexPath) as? FeedCardCell else {
-            return UICollectionViewCell()
+    func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+        guard let cell = tableView.dequeueReusableCell(withIdentifier: FeedCardCell.reuseID, for: indexPath) as? FeedCardCell else {
+            return UITableViewCell()
         }
-        guard indexPath.item < items.count else { return cell }
-        cell.bind(items[indexPath.item], base: FeedService.shared.base)
+        guard indexPath.row < items.count else { return cell }
+        cell.configure(items[indexPath.row], base: FeedService.shared.base)
         return cell
     }
 
-    func collectionView(_ collectionView: UICollectionView,
-                        layout collectionViewLayout: UICollectionViewLayout,
-                        sizeForItemAt indexPath: IndexPath) -> CGSize {
-        let s = collectionView.bounds.size
-        if s.width < 1 || s.height < 1 {
-            let v = view.bounds.size
-            return v.width > 1 ? v : CGSize(width: 320, height: 568)
-        }
-        return s
+    func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
+        let h = tableView.bounds.height
+        return h > 1 ? h : max(view.bounds.height, 1)
     }
 
-    func scrollViewDidScroll(_ scrollView: UIScrollView) {
-        guard !items.isEmpty else { return }
-        let h = max(scrollView.bounds.height, 1)
-        let idx = Int((scrollView.contentOffset.y / h).rounded())
-        guard idx >= 0, idx < items.count else { return }
-
-        let fast = abs(scrollView.panGestureRecognizer.velocity(in: scrollView).y) > 800
-        if fast, !pool.isScrubbing {
-            pool.setScrubbing(true)
-        }
-
-        if idx != currentIndex {
-            syncPool(to: idx, scrubbing: fast)
-        } else {
-            attachLayers()
-        }
-
-        if idx + 3 >= items.count { loadMore() }
+    func tableView(_ tableView: UITableView, willDisplay cell: UITableViewCell, forRowAt indexPath: IndexPath) {
+        // 原版逻辑：新 cell 出来先暂停，等松手再播
+        (cell as? FeedCardCell)?.pause()
+        currentIndex = indexPath.row
+        if indexPath.row + 2 >= items.count { loadMore() }
     }
+
+    func tableView(_ tableView: UITableView, didEndDisplaying cell: UITableViewCell, forRowAt indexPath: IndexPath) {
+        (cell as? FeedCardCell)?.pause()
+    }
+}
+
+// MARK: - 滚动
+
+extension FeedViewController: UIScrollViewDelegate {
 
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
-        if !decelerate { settle() }
+        if !decelerate { settleAndPlay() }
     }
 
     func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) {
-        settle()
+        settleAndPlay()
     }
 
-    private func settle() {
-        let h = max(collectionView.bounds.height, 1)
-        let idx = Int((collectionView.bounds.width > 0 ? collectionView.contentOffset.y / h : 0).rounded())
+    /// 松手停稳后：回到第 0 秒重新播
+    private func settleAndPlay() {
+        guard !items.isEmpty else { return }
+        let h = max(tableView.bounds.height, 1)
+        let idx = Int((tableView.contentOffset.y / h).rounded())
         guard idx >= 0, idx < items.count else { return }
-        if idx != currentIndex { syncPool(to: idx, scrubbing: false) }
-        pool.setScrubbing(false)
-        pool.play()
-        attachLayers()
+        currentIndex = idx
+        if let cell = cellAt(idx) {
+            cell.replay()
+        } else {
+            visibleCell()?.play()
+        }
+        let ahead = Array(items[idx..<min(idx + 3, items.count)])
+        FeedService.shared.prefetchFirstFrames(ahead)
+        if idx + 2 >= items.count { loadMore() }
     }
 }

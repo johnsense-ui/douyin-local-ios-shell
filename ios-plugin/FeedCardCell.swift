@@ -1,110 +1,134 @@
-import AVFoundation
 import UIKit
+import AVFoundation
 
-/// 一屏视频卡片：首帧图 + 原生播放画面 + 文字。
+/// 一屏视频 cell。
 ///
-/// 布局全部纯 frame，不用自动布局 —— 少一层出错的可能。
+/// 移植自 dks333/Tiktok-Clone 的 HomeTableViewCell，改：
+///   · 不用 XIB / IBOutlet，纯代码布局
+///   · 不用 MarqueeLabel，用普通 UILabel
+///   · 数据换成我们的 VideoItem
 ///
-/// 层叠关系（从下到上）：
-///   firstFrame(首帧图) → videoHost(AVPlayerLayer 挂这儿) → gradient → 文字
-///   首帧图在最下层顶着，原生画面出来后就把它盖住；万一原生没就绪，
-///   用户看到的是首帧图而不是黑屏。
-final class FeedCardCell: UICollectionViewCell {
+/// 播放器由 cell 自己持有（这是原版的设计）。
+/// 虽然"播放器放池子里"理论更省，但原版这样写能跑通 ——
+/// 先用被验证过的方案，跑通后再考虑优化。
+final class FeedCardCell: UITableViewCell {
 
-    /// 播放器的 layer 挂在这里
-    let videoHost = UIView()
+    static let reuseID = "FeedCardCell"
 
-    private let firstFrame = UIImageView()
-    private let gradient = CAGradientLayer()
-    private let shade = UIView()
+    let playerView = VideoPlayerView()
 
-    private let authorLabel = UILabel()
-    private let textLabel = UILabel()
-    private let audioLabel = UILabel()
-    private let indexLabel = UILabel()
-    private let playIcon = UIImageView()
-    private let statusLabel = UILabel()
+    private let nameLabel = UILabel()
+    private let captionLabel = UILabel()
+    private let musicLabel = UILabel()
+    private let likeBtn = UIButton(type: .custom)
+    private let likeCountLabel = UILabel()
+    private let commentBtn = UIButton(type: .custom)
+    private let shareBtn = UIButton(type: .custom)
+    private let pauseIcon = UIImageView()
+    private let avatarView = UIImageView()
+    private let debugLabel = UILabel()
 
-    private var imageTask: URLSessionDataTask?
-    private var currentID: Int = -1
+    private(set) var isPlaying = false
+    private(set) var liked = false
+    private var videoID: Int = -1
 
-    private static let cache = NSCache<NSString, UIImage>()
+    // MARK: - init
 
-    override init(frame: CGRect) {
-        super.init(frame: frame)
-        setupCell()
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
+        setup()
     }
 
     required init?(coder: NSCoder) {
         super.init(coder: coder)
-        setupCell()
+        setup()
     }
 
     override func prepareForReuse() {
         super.prepareForReuse()
-        imageTask?.cancel()
-        imageTask = nil
-        currentID = -1
-        firstFrame.image = nil
-        firstFrame.isHidden = false
-        playIcon.isHidden = true
-        statusLabel.text = nil
+        playerView.teardown()
+        isPlaying = false
+        pauseIcon.alpha = 0
+        captionLabel.text = nil
+        debugLabel.text = nil
     }
 
-    private func setupCell() {
+    // MARK: - 布局（纯 frame）
+
+    private func setup() {
+        selectionStyle = .none
         backgroundColor = .black
         contentView.backgroundColor = .black
         contentView.clipsToBounds = true
 
-        // 1. 首帧图（最底层，顶着用）
-        firstFrame.contentMode = .scaleAspectFill
-        firstFrame.backgroundColor = UIColor(white: 0.08, alpha: 1)
-        firstFrame.clipsToBounds = true
-        contentView.addSubview(firstFrame)
+        // 播放器铺满，放最底层
+        playerView.frame = contentView.bounds
+        playerView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        contentView.addSubview(playerView)
 
-        // 2. 原生画面容器
-        videoHost.backgroundColor = .clear
-        videoHost.isUserInteractionEnabled = false
-        contentView.addSubview(videoHost)
+        // 底部渐变
+        let g = CAGradientLayer()
+        g.colors = [UIColor.clear.cgColor, UIColor(white: 0, alpha: 0.6).cgColor]
+        g.locations = [0.55, 1.0]
+        g.name = "grad"
+        contentView.layer.addSublayer(g)
 
-        // 3. 底部渐变
-        gradient.colors = [UIColor.clear.cgColor,
-                           UIColor(white: 0, alpha: 0.55).cgColor]
-        gradient.locations = [0.55, 1.0]
-        contentView.layer.addSublayer(gradient)
+        // 右侧按钮
+        for b in [likeBtn, commentBtn, shareBtn] {
+            b.translatesAutoresizingMaskIntoConstraints = true
+            b.tintColor = .white
+            contentView.addSubview(b)
+        }
+        likeBtn.setImage(UIImage(systemName: "heart.fill"), for: .normal)
+        commentBtn.setImage(UIImage(systemName: "bubble.right.fill"), for: .normal)
+        shareBtn.setImage(UIImage(systemName: "arrowshape.turn.up.right.fill"), for: .normal)
 
-        // 4. 文字
-        authorLabel.textColor = .white
-        authorLabel.font = .systemFont(ofSize: 17, weight: .bold)
-        contentView.addSubview(authorLabel)
+        for l in [likeCountLabel, nameLabel, captionLabel, musicLabel, debugLabel] {
+            l.translatesAutoresizingMaskIntoConstraints = true
+            contentView.addSubview(l)
+        }
+        likeCountLabel.textColor = .white
+        likeCountLabel.font = .systemFont(ofSize: 12)
+        likeCountLabel.textAlignment = .center
 
-        textLabel.textColor = .white
-        textLabel.font = .systemFont(ofSize: 14)
-        textLabel.numberOfLines = 3
-        contentView.addSubview(textLabel)
+        avatarView.backgroundColor = UIColor(white: 0.25, alpha: 1)
+        avatarView.layer.cornerRadius = 23
+        avatarView.layer.borderWidth = 1.5
+        avatarView.layer.borderColor = UIColor.white.cgColor
+        avatarView.clipsToBounds = true
+        avatarView.image = UIImage(systemName: "person.fill")
+        avatarView.tintColor = UIColor(white: 0.7, alpha: 1)
+        avatarView.contentMode = .center
+        contentView.addSubview(avatarView)
 
-        audioLabel.textColor = UIColor(white: 1, alpha: 0.85)
-        audioLabel.font = .systemFont(ofSize: 13)
-        contentView.addSubview(audioLabel)
+        nameLabel.textColor = .white
+        nameLabel.font = .systemFont(ofSize: 17, weight: .semibold)
 
-        indexLabel.textColor = UIColor(white: 1, alpha: 0.5)
-        indexLabel.font = .systemFont(ofSize: 11)
-        indexLabel.textAlignment = .center
-        contentView.addSubview(indexLabel)
+        captionLabel.textColor = .white
+        captionLabel.font = .systemFont(ofSize: 14)
+        captionLabel.numberOfLines = 3
 
-        // 5. 播放图标（暂停时显示）
-        playIcon.image = UIImage(systemName: "play.fill")
-        playIcon.tintColor = UIColor(white: 1, alpha: 0.8)
-        playIcon.contentMode = .scaleAspectFit
-        playIcon.isHidden = true
-        contentView.addSubview(playIcon)
+        musicLabel.textColor = UIColor(white: 1, alpha: 0.85)
+        musicLabel.font = .systemFont(ofSize: 13)
 
-        // 6. 错误/状态
-        statusLabel.textColor = UIColor(red: 1, green: 0.4, blue: 0.4, alpha: 1)
-        statusLabel.font = .systemFont(ofSize: 12)
-        statusLabel.numberOfLines = 2
-        statusLabel.textAlignment = .center
-        contentView.addSubview(statusLabel)
+        pauseIcon.image = UIImage(systemName: "play.fill")
+        pauseIcon.tintColor = UIColor(white: 1, alpha: 0.8)
+        pauseIcon.contentMode = .scaleAspectFit
+        pauseIcon.alpha = 0
+        contentView.addSubview(pauseIcon)
+
+        debugLabel.textColor = UIColor(red: 0.3, green: 1, blue: 0.5, alpha: 1)
+        debugLabel.backgroundColor = UIColor(white: 0, alpha: 0.7)
+        debugLabel.font = UIFont(name: "Menlo", size: 8) ?? .systemFont(ofSize: 8)
+        debugLabel.numberOfLines = 3
+
+        // 手势
+        let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap))
+        let dbl = UITapGestureRecognizer(target: self, action: #selector(handleDoubleTap(_:)))
+        dbl.numberOfTapsRequired = 2
+        tap.require(toFail: dbl)
+        contentView.addGestureRecognizer(tap)
+        contentView.addGestureRecognizer(dbl)
     }
 
     override func layoutSubviews() {
@@ -113,93 +137,128 @@ final class FeedCardCell: UICollectionViewCell {
         let h = contentView.bounds.height
         guard w > 1, h > 1 else { return }
 
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        firstFrame.frame = contentView.bounds
-        videoHost.frame = contentView.bounds
-        gradient.frame = CGRect(x: 0, y: h * 0.5, width: w, height: h * 0.5)
-        CATransaction.commit()
+        playerView.frame = contentView.bounds
+        contentView.layer.sublayers?.first { $0.name == "grad" }?.frame =
+            CGRect(x: 0, y: h * 0.55, width: w, height: h * 0.45)
 
         let pad: CGFloat = 16
-        let textW = w - pad * 2
+        let rightX = w - 56
+        var ry = h - 200
+        likeBtn.frame = CGRect(x: rightX, y: ry, width: 40, height: 40)
+        likeCountLabel.frame = CGRect(x: rightX - 6, y: ry + 40, width: 52, height: 16)
+        ry -= 74
+        commentBtn.frame = CGRect(x: rightX, y: ry, width: 40, height: 40)
+        ry -= 64
+        shareBtn.frame = CGRect(x: rightX, y: ry, width: 40, height: 40)
+        ry -= 70
+        avatarView.frame = CGRect(x: rightX - 3, y: ry, width: 46, height: 46)
 
-        var y = h - pad - 34
-        audioLabel.frame = CGRect(x: pad, y: y, width: textW, height: 18)
+        let textW = w - pad * 2 - 70
+        var y = h - pad - 20
+        musicLabel.frame = CGRect(x: pad, y: y, width: textW, height: 18)
         y -= 24
+        let c = captionLabel.text ?? ""
+        let lines = max(1, min(3, c.count / 20 + 1))
+        let ch = CGFloat(lines) * 19
+        captionLabel.frame = CGRect(x: pad, y: y - ch, width: textW, height: ch)
+        y -= ch + 6
+        nameLabel.frame = CGRect(x: pad, y: y - 22, width: textW, height: 22)
 
-        let t = textLabel.text ?? ""
-        let lines = max(1, min(3, t.count / 22 + 1))
-        let textH = CGFloat(lines) * 19
-        textLabel.frame = CGRect(x: pad, y: y - textH, width: textW, height: textH)
-        y -= textH + 6
+        let icon: CGFloat = 60
+        pauseIcon.frame = CGRect(x: (w - icon) / 2, y: (h - icon) / 2, width: icon, height: icon)
 
-        authorLabel.frame = CGRect(x: pad, y: y - 22, width: textW, height: 22)
-
-        indexLabel.frame = CGRect(x: (w - 80) / 2, y: safeTop() + 6, width: 80, height: 16)
-
-        let iconSide: CGFloat = 64
-        playIcon.frame = CGRect(x: (w - iconSide) / 2, y: (h - iconSide) / 2,
-                                width: iconSide, height: iconSide)
-
-        statusLabel.frame = CGRect(x: 24, y: h / 2 + 44, width: w - 48, height: 40)
+        debugLabel.frame = CGRect(x: 6, y: safeTop() + 4, width: w - 12, height: 40)
     }
 
     private func safeTop() -> CGFloat {
-        var t: CGFloat = 0
+        var t: CGFloat = 20
         if #available(iOS 13.0, *) {
-            t = window?.windowScene?.statusBarManager?.statusBarFrame.height ?? 0
+            t = window?.windowScene?.statusBarManager?.statusBarFrame.height ?? 20
         }
         return max(t, 20)
     }
 
     // MARK: - 绑定
 
-    func bind(_ item: VideoItem, base: String) {
-        currentID = item.id
-        authorLabel.text = "@" + item.author
-        textLabel.text = item.text
-        audioLabel.text = "♪ " + item.audio
-        indexLabel.text = "#\(item.id)"
-        statusLabel.text = nil
+    func configure(_ item: VideoItem, base: String) {
+        videoID = item.id
+        nameLabel.text = "@" + item.author
+        captionLabel.text = item.text
+        musicLabel.text = "♪ " + item.audio
+        likeCountLabel.text = item.diggText
         setNeedsLayout()
-        loadImage(item, base: base)
-    }
 
-    /// 原生画面就绪 → 把首帧图藏起来
-    func setNativeVisible(_ visible: Bool) {
-        firstFrame.isHidden = visible
-    }
+        playerView.onStatus = { [weak self] s in
+            guard let self else { return }
+            self.debugLabel.text = "id=\(item.id) \(s) \(self.playerView.debugText())"
+        }
+        playerView.onError = { [weak self] msg in
+            self?.debugLabel.text = "id=\(item.id) ERR \(msg)"
+        }
 
-    func setPlaying(_ playing: Bool) {
-        playIcon.isHidden = playing
-    }
-
-    func showError(_ msg: String) {
-        statusLabel.text = msg
-        firstFrame.isHidden = false
-    }
-
-    func clearError() {
-        statusLabel.text = nil
-    }
-
-    private func loadImage(_ item: VideoItem, base: String) {
-        let key = "ff-\(item.id)" as NSString
-        if let hit = Self.cache.object(forKey: key) {
-            firstFrame.image = hit
+        guard let url = item.streamURL(base) else {
+            debugLabel.text = "id=\(item.id) 地址无效"
             return
         }
-        firstFrame.image = nil
+        playerView.configure(url: url, aspect: item.aspect)
+        debugLabel.text = "id=\(item.id) 配置中…"
+    }
 
-        let url = item.firstFrameURL(base) ?? item.posterURL(base)
-        guard let u = url else { return }
+    // MARK: - 播放控制
 
-        imageTask?.cancel()
-        imageTask = URLSession.shared.dataTask(with: u) { [weak self] data, _, _ in
-            guard let data, let img = UIImage(data: data) else { return }
-            Self.cache.setObject(img, forKey: key)
-            DispatchQueue.main.async { self?.firstFrame.image = img }
+    func play() {
+        guard !isPlaying else { return }
+        playerView.play()
+        isPlaying = true
+        pauseIcon.alpha = 0
+    }
+
+    func pause() {
+        guard isPlaying else { return }
+        playerView.pause()
+        isPlaying = false
+    }
+
+    func replay() {
+        playerView.replay()
+        isPlaying = true
+        pauseIcon.alpha = 0
+    }
+
+    // MARK: - 手势
+
+    @objc private func handleTap() {
+        if isPlaying {
+            pause()
+            UIView.animate(withDuration: 0.08) { self.pauseIcon.alpha = 0.35 }
+        } else {
+            play()
         }
-        imageTask?.resume()
+    }
+
+    @objc private func handleDoubleTap(_ g: UITapGestureRecognizer) {
+        // 双击点赞：爱心飞出
+        if !liked {
+            liked = true
+            likeBtn.tintColor = .red
+        }
+        let p = g.location(in: contentView)
+        let heart = UIImageView(image: UIImage(systemName: "heart.fill"))
+        heart.tintColor = .red
+        heart.contentMode = .scaleAspectFit
+        let s: CGFloat = 100
+        heart.frame = CGRect(x: p.x - s / 2, y: p.y - s / 2, width: s, height: s)
+        heart.transform = CGAffineTransform(rotationAngle: CGFloat.random(in: -0.4...0.4))
+        contentView.addSubview(heart)
+        UIView.animate(withDuration: 0.3, delay: 0, usingSpringWithDamping: 0.8, initialSpringVelocity: 3) {
+            heart.transform = heart.transform.scaledBy(x: 0.85, y: 0.85)
+        } completion: { _ in
+            UIView.animate(withDuration: 0.4, delay: 0.08, usingSpringWithDamping: 0.8, initialSpringVelocity: 3) {
+                heart.transform = heart.transform.scaledBy(x: 2.3, y: 2.3)
+                heart.alpha = 0
+            } completion: { _ in
+                heart.removeFromSuperview()
+            }
+        }
     }
 }
