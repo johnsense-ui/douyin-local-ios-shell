@@ -3,14 +3,13 @@ import type { CapacitorConfig } from '@capacitor/cli';
 /**
  * iOS 壳配置。
  *
- * 关键点：
- *   · iosScheme = 'capacitor'：本站页面跑在 capacitor://localhost，
- *     接口请求要走绝对地址（native-bridge.js 里的 serverBase）。
- *   · 允许 cors / 明文：走 Tailscale 时是 https，走局域网时是 http。
- *   · limitsNavigationsToAppBoundDomains = false：否则首次填服务器地址后 reload 会被拦。
+ * appId 每次做大版本验证时换一个，避免 Sideloadly 覆盖安装失效：
+ * 系统会把它当成全新 App，不可能被旧版本顶替。
+ *   v1: local.douyin.shell   （网页壳，能跑）
+ *   v2: local.dzc.feed2      （原生 feed 验证）
  */
 const config: CapacitorConfig = {
-  appId: 'local.douyin.shell',
+  appId: 'local.dzc.feed2',
   appName: '本地视频',
   webDir: 'www',
   ios: {
@@ -27,7 +26,7 @@ const config: CapacitorConfig = {
   plugins: {
     SplashScreen: {
       launchAutoHide: true,
-      launchShowDuration: 800,
+      launchShowDuration: 600,
       backgroundColor: '#000000FF',
       showSpinner: false,
     },

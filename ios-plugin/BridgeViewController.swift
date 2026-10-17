@@ -2,17 +2,16 @@ import UIKit
 import Capacitor
 import WebKit
 
-/// 应用入口 —— 最小验证版。
+/// 应用入口（第 2 步：直接进原生 feed，接真实数据）。
 ///
-/// 目的：先确认「原生 VC 能挂上、能分页」这条链路通不通。
-/// 不注册任何自定义插件，不接播放器，不接数据。
-/// 左上角绿点表示原生 feed 已挂载，右下角按钮在原生/网页之间切换。
+/// 网页壳留在 `?web=1` 后面，需要对照时用。
+/// 左上角小字显示当前模式，右下角按钮可切换。
 class BridgeViewController: CAPBridgeViewController {
 
     private var nativeFeed: FeedViewController?
-    private var badge: UILabel?
     private var switchButton: UIButton?
-    private var didSetupUI = false
+    private var modeLabel: UILabel?
+    private var didSetup = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -30,63 +29,75 @@ class BridgeViewController: CAPBridgeViewController {
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        guard !didSetupUI else { return }
-        didSetupUI = true
+        guard !didSetup else { return }
+        didSetup = true
         addControls()
-        mountNativeFeed()
+
+        let url = webView?.url?.absoluteString ?? ""
+        if url.contains("web=1") {
+            setMode(false)
+        } else {
+            mountFeed()
+        }
     }
 
     private func addControls() {
         let b = UIButton(type: .custom)
         b.setTitle("切网页", for: .normal)
         b.setTitleColor(.white, for: .normal)
-        b.titleLabel?.font = .systemFont(ofSize: 13, weight: .medium)
-        b.backgroundColor = UIColor(white: 0, alpha: 0.6)
-        b.layer.cornerRadius = 15
+        b.titleLabel?.font = .systemFont(ofSize: 12, weight: .medium)
+        b.backgroundColor = UIColor(white: 0, alpha: 0.55)
+        b.layer.cornerRadius = 14
         b.layer.borderWidth = 0.5
-        b.layer.borderColor = UIColor(white: 1, alpha: 0.4).cgColor
+        b.layer.borderColor = UIColor(white: 1, alpha: 0.35).cgColor
         b.translatesAutoresizingMaskIntoConstraints = false
-        b.addTarget(self, action: #selector(toggleFeed), for: .touchUpInside)
+        b.addTarget(self, action: #selector(toggle), for: .touchUpInside)
         view.addSubview(b)
         NSLayoutConstraint.activate([
-            b.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
-            b.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12),
-            b.widthAnchor.constraint(equalToConstant: 76),
-            b.heightAnchor.constraint(equalToConstant: 32),
+            b.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -10),
+            b.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -10),
+            b.widthAnchor.constraint(equalToConstant: 70),
+            b.heightAnchor.constraint(equalToConstant: 28),
         ])
         switchButton = b
 
-        let dot = UILabel()
-        dot.text = "原生已挂载"
-        dot.textColor = .white
-        dot.font = .systemFont(ofSize: 11)
-        dot.backgroundColor = UIColor(red: 0, green: 0.55, blue: 0.2, alpha: 0.9)
-        dot.textAlignment = .center
-        dot.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(dot)
+        let m = UILabel()
+        m.text = "原生"
+        m.textColor = .white
+        m.font = .systemFont(ofSize: 10)
+        m.backgroundColor = UIColor(white: 0, alpha: 0.45)
+        m.textAlignment = .center
+        m.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(m)
         NSLayoutConstraint.activate([
-            dot.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-            dot.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
-            dot.widthAnchor.constraint(equalToConstant: 90),
-            dot.heightAnchor.constraint(equalToConstant: 20),
+            m.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 10),
+            m.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 6),
+            m.widthAnchor.constraint(equalToConstant: 44),
+            m.heightAnchor.constraint(equalToConstant: 18),
         ])
-        badge = dot
+        modeLabel = m
     }
 
-    @objc private func toggleFeed() {
+    @objc private func toggle() {
         if nativeFeed != nil {
-            removeNativeFeed()
+            removeFeed()
+            setMode(false)
         } else {
-            mountNativeFeed()
+            mountFeed()
+            setMode(true)
         }
     }
 
-    private func mountNativeFeed() {
-        guard nativeFeed == nil, view.window != nil else { return }
+    private func setMode(_ native: Bool) {
+        modeLabel?.text = native ? "原生" : "网页"
+        switchButton?.setTitle(native ? "切网页" : "切原生", for: .normal)
+    }
 
+    private func mountFeed() {
+        guard nativeFeed == nil, view.window != nil else { return }
         let feed = FeedViewController()
-        addChild(feed)                    // 先 addChild
-        guard let fv = feed.view else {   // 再取 view
+        addChild(feed)
+        guard let fv = feed.view else {
             feed.removeFromParent()
             return
         }
@@ -100,20 +111,14 @@ class BridgeViewController: CAPBridgeViewController {
         ])
         feed.didMove(toParent: self)
         nativeFeed = feed
-        badge?.text = "原生已挂载"
-        badge?.backgroundColor = UIColor(red: 0, green: 0.55, blue: 0.2, alpha: 0.9)
-        switchButton?.setTitle("切网页", for: .normal)
     }
 
-    private func removeNativeFeed() {
+    private func removeFeed() {
         guard let feed = nativeFeed else { return }
         feed.willMove(toParent: nil)
         feed.view.removeFromSuperview()
         feed.removeFromParent()
         nativeFeed = nil
-        badge?.text = "网页模式"
-        badge?.backgroundColor = UIColor(white: 0.3, alpha: 0.9)
-        switchButton?.setTitle("切原生", for: .normal)
     }
 
     override var prefersStatusBarHidden: Bool { false }
