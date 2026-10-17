@@ -1,10 +1,18 @@
+import AVFoundation
 import UIKit
 
-/// 一屏视频卡片（第 2 步：只显示首帧图 + 文字，不含播放器）。
+/// 一屏视频卡片：首帧图 + 原生播放画面 + 文字。
 ///
-/// 布局全部用**纯 frame**，不用自动布局 —— 少一层出错的可能。
-/// cell 尺寸变化时在 layoutSubviews 里重排。
+/// 布局全部纯 frame，不用自动布局 —— 少一层出错的可能。
+///
+/// 层叠关系（从下到上）：
+///   firstFrame(首帧图) → videoHost(AVPlayerLayer 挂这儿) → gradient → 文字
+///   首帧图在最下层顶着，原生画面出来后就把它盖住；万一原生没就绪，
+///   用户看到的是首帧图而不是黑屏。
 final class FeedCardCell: UICollectionViewCell {
+
+    /// 播放器的 layer 挂在这里
+    let videoHost = UIView()
 
     private let firstFrame = UIImageView()
     private let gradient = CAGradientLayer()
@@ -14,7 +22,8 @@ final class FeedCardCell: UICollectionViewCell {
     private let textLabel = UILabel()
     private let audioLabel = UILabel()
     private let indexLabel = UILabel()
-    private let loadingBox = UIView()
+    private let playIcon = UIImageView()
+    private let statusLabel = UILabel()
 
     private var imageTask: URLSessionDataTask?
     private var currentID: Int = -1
@@ -37,6 +46,9 @@ final class FeedCardCell: UICollectionViewCell {
         imageTask = nil
         currentID = -1
         firstFrame.image = nil
+        firstFrame.isHidden = false
+        playIcon.isHidden = true
+        statusLabel.text = nil
     }
 
     private func setupCell() {
@@ -44,17 +56,24 @@ final class FeedCardCell: UICollectionViewCell {
         contentView.backgroundColor = .black
         contentView.clipsToBounds = true
 
+        // 1. 首帧图（最底层，顶着用）
         firstFrame.contentMode = .scaleAspectFill
         firstFrame.backgroundColor = UIColor(white: 0.08, alpha: 1)
         firstFrame.clipsToBounds = true
         contentView.addSubview(firstFrame)
 
-        // 底部渐变，让文字在亮画面上也看得清
+        // 2. 原生画面容器
+        videoHost.backgroundColor = .clear
+        videoHost.isUserInteractionEnabled = false
+        contentView.addSubview(videoHost)
+
+        // 3. 底部渐变
         gradient.colors = [UIColor.clear.cgColor,
                            UIColor(white: 0, alpha: 0.55).cgColor]
         gradient.locations = [0.55, 1.0]
         contentView.layer.addSublayer(gradient)
 
+        // 4. 文字
         authorLabel.textColor = .white
         authorLabel.font = .systemFont(ofSize: 17, weight: .bold)
         contentView.addSubview(authorLabel)
@@ -72,6 +91,20 @@ final class FeedCardCell: UICollectionViewCell {
         indexLabel.font = .systemFont(ofSize: 11)
         indexLabel.textAlignment = .center
         contentView.addSubview(indexLabel)
+
+        // 5. 播放图标（暂停时显示）
+        playIcon.image = UIImage(systemName: "play.fill")
+        playIcon.tintColor = UIColor(white: 1, alpha: 0.8)
+        playIcon.contentMode = .scaleAspectFit
+        playIcon.isHidden = true
+        contentView.addSubview(playIcon)
+
+        // 6. 错误/状态
+        statusLabel.textColor = UIColor(red: 1, green: 0.4, blue: 0.4, alpha: 1)
+        statusLabel.font = .systemFont(ofSize: 12)
+        statusLabel.numberOfLines = 2
+        statusLabel.textAlignment = .center
+        contentView.addSubview(statusLabel)
     }
 
     override func layoutSubviews() {
@@ -83,23 +116,32 @@ final class FeedCardCell: UICollectionViewCell {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         firstFrame.frame = contentView.bounds
+        videoHost.frame = contentView.bounds
         gradient.frame = CGRect(x: 0, y: h * 0.5, width: w, height: h * 0.5)
         CATransaction.commit()
 
         let pad: CGFloat = 16
         let textW = w - pad * 2
 
-        var y = h - pad
-        audioLabel.frame = CGRect(x: pad, y: y - 18, width: textW, height: 18)
-        y -= 18 + 6
+        var y = h - pad - 34
+        audioLabel.frame = CGRect(x: pad, y: y, width: textW, height: 18)
+        y -= 24
 
-        let textH = CGFloat(min(3, max(1, (textLabel.text ?? "").count / 22 + 1))) * 19
+        let t = textLabel.text ?? ""
+        let lines = max(1, min(3, t.count / 22 + 1))
+        let textH = CGFloat(lines) * 19
         textLabel.frame = CGRect(x: pad, y: y - textH, width: textW, height: textH)
-        y -= textH + 8
+        y -= textH + 6
 
         authorLabel.frame = CGRect(x: pad, y: y - 22, width: textW, height: 22)
 
-        indexLabel.frame = CGRect(x: (w - 60) / 2, y: safeTop() + 6, width: 60, height: 16)
+        indexLabel.frame = CGRect(x: (w - 80) / 2, y: safeTop() + 6, width: 80, height: 16)
+
+        let iconSide: CGFloat = 64
+        playIcon.frame = CGRect(x: (w - iconSide) / 2, y: (h - iconSide) / 2,
+                                width: iconSide, height: iconSide)
+
+        statusLabel.frame = CGRect(x: 24, y: h / 2 + 44, width: w - 48, height: 40)
     }
 
     private func safeTop() -> CGFloat {
@@ -113,14 +155,32 @@ final class FeedCardCell: UICollectionViewCell {
     // MARK: - 绑定
 
     func bind(_ item: VideoItem, base: String) {
+        currentID = item.id
         authorLabel.text = "@" + item.author
         textLabel.text = item.text
         audioLabel.text = "♪ " + item.audio
         indexLabel.text = "#\(item.id)"
-        indexLabel.isHidden = false
+        statusLabel.text = nil
         setNeedsLayout()
-
         loadImage(item, base: base)
+    }
+
+    /// 原生画面就绪 → 把首帧图藏起来
+    func setNativeVisible(_ visible: Bool) {
+        firstFrame.isHidden = visible
+    }
+
+    func setPlaying(_ playing: Bool) {
+        playIcon.isHidden = playing
+    }
+
+    func showError(_ msg: String) {
+        statusLabel.text = msg
+        firstFrame.isHidden = false
+    }
+
+    func clearError() {
+        statusLabel.text = nil
     }
 
     private func loadImage(_ item: VideoItem, base: String) {
@@ -131,7 +191,6 @@ final class FeedCardCell: UICollectionViewCell {
         }
         firstFrame.image = nil
 
-        // 优先首帧图；没有就用封面
         let url = item.firstFrameURL(base) ?? item.posterURL(base)
         guard let u = url else { return }
 
@@ -139,9 +198,7 @@ final class FeedCardCell: UICollectionViewCell {
         imageTask = URLSession.shared.dataTask(with: u) { [weak self] data, _, _ in
             guard let data, let img = UIImage(data: data) else { return }
             Self.cache.setObject(img, forKey: key)
-            DispatchQueue.main.async {
-                self?.firstFrame.image = img
-            }
+            DispatchQueue.main.async { self?.firstFrame.image = img }
         }
         imageTask?.resume()
     }
