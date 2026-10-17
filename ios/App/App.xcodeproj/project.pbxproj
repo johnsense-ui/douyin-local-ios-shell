@@ -33,9 +33,9 @@
 		AF277DCFFFF123FFC6DF26C7 /* Pods_App.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_App.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		AF51FD2D460BCFE21FA515B2 /* Pods-App.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-App.release.xcconfig"; path = "Pods/Target Support Files/Pods-App/Pods-App.release.xcconfig"; sourceTree = "<group>"; };
 		FC68EB0AF532CFC21C3344DD /* Pods-App.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-App.debug.xcconfig"; path = "Pods/Target Support Files/Pods-App/Pods-App.debug.xcconfig"; sourceTree = "<group>"; };
-		4D88B3AD5DB1D75FCDC5C358 /* BridgeViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "BridgeViewController.swift"; sourceTree = "<group>"; };
-		D534B685B26E8F897AE641B3 /* NativeStage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "NativeStage.swift"; sourceTree = "<group>"; };
-		A6F41B6C185E2736B08FC528 /* NativeVideoPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "NativeVideoPlugin.swift"; sourceTree = "<group>"; };
+		4D88B3AD5DB1D75FCDC5C358 /* BridgeViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "NativeStage/BridgeViewController.swift"; sourceTree = "<group>"; };
+		D534B685B26E8F897AE641B3 /* NativeStage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "NativeStage/NativeStage.swift"; sourceTree = "<group>"; };
+		A6F41B6C185E2736B08FC528 /* NativeVideoPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "NativeStage/NativeVideoPlugin.swift"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */

@@ -84,9 +84,12 @@ for f in swifts:
     ref_id = oid(f"fileref:{name}")
     build_id = oid(f"buildfile:{name}")
 
+    # 文件挂在 App group 下，但实体在 App/NativeStage/ 子目录里，
+    # 所以 path 必须带子目录前缀，否则 xcodebuild 找不到输入文件（exit 65）。
+    rel_path = f"{SRC_DIR.name}/{name}"
     new_refs.append(
         f'\t\t{ref_id} /* {name} */ = {{isa = PBXFileReference; lastKnownFileType = sourcecode.swift; '
-        f'path = "{name}"; sourceTree = "<group>"; }};\n'
+        f'path = "{rel_path}"; sourceTree = "<group>"; }};\n'
     )
     new_builds.append(
         f"\t\t{build_id} /* {name} in Sources */ = {{isa = PBXBuildFile; "
