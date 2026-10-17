@@ -1,0 +1,30 @@
+{
+  "name": "douyin-local-ios-shell",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "iOS 原生壳：把 douyin-local 的 web/dist 装进 WKWebView，并用 AVPlayer 播视频（绕开 WebKit 视频层的坑）",
+  "scripts": {
+    "sync:web": "node scripts/copy-web.mjs",
+    "copy:swift": "node scripts/copy-swift.mjs",
+    "patch:proj": "python .github/scripts/patch-pbxproj.py",
+    "cap:sync": "npm run sync:web && cap sync ios",
+    "cap:add": "cap add ios",
+    "cap:open": "cap open ios",
+    "build:web": "npm --prefix ../_research/Gaoyubao0917__douyin-local/web run build",
+    "ios:prepare": "npm run build:web && npm run sync:web && cap add ios",
+    "ios:patch": "npm run copy:swift && npm run patch:proj",
+    "ios:all": "npm run ios:prepare && npm run ios:patch && cap sync ios",
+    "doctor": "node scripts/doctor.mjs"
+  },
+  "dependencies": {
+    "@capacitor/core": "^6.2.0",
+    "@capacitor/ios": "^6.2.0",
+    "@capacitor/splash-screen": "^6.0.3",
+    "@capacitor/status-bar": "^6.0.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.2.0",
+    "typescript": "5.6.3"
+  }
+}

@@ -1,0 +1,17 @@
+# 依赖
+node_modules/
+
+# Capacitor / CocoaPods 生成物（ios/ 骨架本身提交了，这些不提交）
+ios/App/Pods/
+ios/App/Podfile.lock
+ios/App/build/
+ios/App/App/public/
+ios/App/App/NativeStage/
+ios/App/App/capacitor.config.json
+
+# www/ 是主项目 web/dist 的拷贝 —— 提交进仓库，CI 才能直接打 IPA
+# （改了网页代码就 npm run build:web && npm run sync:web，然后一起提交）
+
+# 杂项
+.DS_Store
+*.log

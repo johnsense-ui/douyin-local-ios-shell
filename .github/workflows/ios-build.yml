@@ -1,0 +1,160 @@
+name: ios-build
+
+# 没有 Mac 也能出 iOS 安装包。
+#
+#   GitHub Actions 的 macOS runner 免费跑 xcodebuild（公开仓库不限时长），
+#   产出**未签名**的 .ipa；你在 Windows 上用 Sideloadly + 免费 Apple ID 签装。
+#
+# 触发：手动 Run workflow，或者 push 到 main 改了壳相关文件。
+on:
+  workflow_dispatch:
+    inputs:
+      server_base:
+        description: '可选：内置服务器地址（如 http://192.168.1.10:6688），留空则首启在 App 内填'
+        required: false
+        default: ''
+      build_number:
+        description: '可选：构建号（默认时间戳）'
+        required: false
+        default: ''
+  push:
+    branches: [main]
+    paths:
+      - 'ios-plugin/**'
+      - 'native/**'
+      - 'scripts/**'
+      - 'www/**'
+      - 'ios/**'
+      - 'capacitor.config.ts'
+      - 'package.json'
+      - '.github/workflows/ios-build.yml'
+
+jobs:
+  build:
+    name: Build unsigned .ipa
+    runs-on: macos-14
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 检查 www/
+        run: |
+          if [ ! -f www/index.html ]; then
+            echo "::error::www/index.html 缺失。本地先跑 npm run build:web && npm run sync:web。"
+            exit 1
+          fi
+          echo "www 文件数: $(find www -type f | wc -l)"
+          grep -q 'native-bridge.js' www/index.html && echo "桥已注入" \
+            || (echo "::error::index.html 没注入 native-bridge.js"; exit 1)
+
+      - name: 内置服务器地址（可选）
+        if: ${{ inputs.server_base != '' }}
+        env:
+          SERVER_BASE: ${{ inputs.server_base }}
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib
+          base = (os.environ.get("SERVER_BASE") or "").rstrip("/")
+          if not base:
+              raise SystemExit(0)
+          p = pathlib.Path("www/native-bridge.js")
+          s = p.read_text(encoding="utf-8")
+          anchor = "  function serverBase() {"
+          assert anchor in s, "native-bridge.js 结构变了"
+          s = s.replace(
+              anchor,
+              anchor + "\n    if (!localStorage.getItem(SERVER_KEY) && %s) { return %s; }"
+              % (json.dumps(base), json.dumps(base)),
+              1,
+          )
+          p.write_text(s, encoding="utf-8")
+          print("已内置服务器地址:", base)
+          PY
+
+      - name: 安装依赖与 CocoaPods
+        run: |
+          npm install --no-audit --no-fund
+          sudo gem install cocoapods --no-document || brew install cocoapods
+
+      - name: 拷入原生插件源码
+        run: |
+          mkdir -p ios/App/App/NativeStage
+          cp ios-plugin/*.swift ios/App/App/NativeStage/
+
+      - name: 重打工程补丁（幂等）
+        run: |
+          python3 .github/scripts/patch-pbxproj.py \
+            ios/App/App.xcodeproj/project.pbxproj \
+            ios/App/App/NativeStage
+
+      - name: 同步 web 资源与 Pods
+        run: |
+          npx cap sync ios
+          cd ios/App && pod install --repo-update
+
+      - name: 构建号
+        id: meta
+        run: |
+          BN="${{ inputs.build_number }}"
+          [ -z "$BN" ] && BN=$(date -u +%Y%m%d%H%M)
+          echo "build_number=$BN" >> "$GITHUB_OUTPUT"
+          echo "构建号: $BN"
+
+      - name: xcodebuild archive（不签名）
+        run: |
+          set -o pipefail
+          cd ios/App
+          xcodebuild \
+            -workspace App.xcworkspace \
+            -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/App.xcarchive" \
+            CURRENT_PROJECT_VERSION=${{ steps.meta.outputs.build_number }} \
+            MARKETING_VERSION=1.0 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            EXPANDED_CODE_SIGN_IDENTITY="" \
+            ONLY_ACTIVE_ARCH=NO \
+            ARCHS=arm64 \
+            clean archive
+
+      - name: 打包成 IPA（Payload/App.app）
+        run: |
+          set -euo pipefail
+          APP=$(find "$RUNNER_TEMP/App.xcarchive/Products/Applications" -maxdepth 1 -name '*.app' | head -n1)
+          echo "APP = $APP"
+          test -d "$APP"
+          rm -rf "$RUNNER_TEMP/Payload"
+          mkdir -p "$RUNNER_TEMP/Payload"
+          cp -R "$APP" "$RUNNER_TEMP/Payload/"
+          cd "$RUNNER_TEMP"
+          zip -qry "douyin-local-unsigned.ipa" Payload
+          ls -lh douyin-local-unsigned.ipa
+
+      - name: 上传 ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: douyin-ios-unsigned-${{ steps.meta.outputs.build_number }}
+          path: ${{ runner.temp }}/douyin-local-unsigned.ipa
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: 失败时上传日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs-${{ steps.meta.outputs.build_number }}
+          path: |
+            ios/App/build
+            ~/Library/Logs/gym
+            ~/Library/Logs/CoreSimulator
+          retention-days: 7
+          if-no-files-found: ignore
