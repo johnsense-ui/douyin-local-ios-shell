@@ -2,31 +2,17 @@ import UIKit
 import Capacitor
 import WebKit
 
-/// 应用入口。
+/// 应用入口 —— 最小验证版。
 ///
-/// ═══════════════════════════════════════════════════════════════
-/// 当前策略：**默认进网页壳，不再默认进原生 feed**
-/// ───────────────────────────────────────────────────────────────
-///   原因：原生 feed 在没有 Mac / Xcode 调试器的条件下盲写，
-///   反复闪退。继续这样试错对你不公平。
-///
-///   现在的分工：
-///     · 默认 → 网页壳（能用，虽然有 WebKit 的老问题）
-///     · 点击右上角「原生」按钮 → 试原生 feed
-///     · 原生 feed 崩了 → 自动退回网页壳 + 屏幕显示原因
-///
-///   这样你随时能用 App，我也能拿到崩溃原因再针对性修。
-/// ═══════════════════════════════════════════════════════════════
+/// 目的：先确认「原生 VC 能挂上、能分页」这条链路通不通。
+/// 不注册任何自定义插件，不接播放器，不接数据。
+/// 左上角绿点表示原生 feed 已挂载，右下角按钮在原生/网页之间切换。
 class BridgeViewController: CAPBridgeViewController {
 
     private var nativeFeed: FeedViewController?
-    private var errorBanner: UILabel?
+    private var badge: UILabel?
     private var switchButton: UIButton?
-    private var crashObserver: NSObjectProtocol?
-
-    override open func capacitorDidLoad() {
-        bridge?.registerPluginInstance(NativeVideoPlugin())
-    }
+    private var didSetupUI = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -40,44 +26,54 @@ class BridgeViewController: CAPBridgeViewController {
                 webView.isInspectable = true
             }
         }
-        NotificationCenter.default.post(name: Notification.Name("dzcWebReady"), object: nil)
-
-        installCrashHandlers()
-        loadPreviousCrash()
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        guard switchButton == nil else { return }
-        addSwitchButton()
+        guard !didSetupUI else { return }
+        didSetupUI = true
+        addControls()
+        mountNativeFeed()
     }
 
-    // MARK: - 切换按钮
-
-    private func addSwitchButton() {
-        // 不用 UIButton.Configuration（iOS 15+ 的类型不能出现在声明里，会编译错）。
-        // 全部走 iOS 13 就能用的属性写法。
+    private func addControls() {
         let b = UIButton(type: .custom)
-        b.setTitle("原生", for: .normal)
+        b.setTitle("切网页", for: .normal)
         b.setTitleColor(.white, for: .normal)
         b.titleLabel?.font = .systemFont(ofSize: 13, weight: .medium)
-        b.backgroundColor = UIColor(white: 0, alpha: 0.55)
-        b.layer.cornerRadius = 14
+        b.backgroundColor = UIColor(white: 0, alpha: 0.6)
+        b.layer.cornerRadius = 15
         b.layer.borderWidth = 0.5
-        b.layer.borderColor = UIColor(white: 1, alpha: 0.35).cgColor
+        b.layer.borderColor = UIColor(white: 1, alpha: 0.4).cgColor
         b.translatesAutoresizingMaskIntoConstraints = false
-        b.addTarget(self, action: #selector(toggleNative), for: .touchUpInside)
+        b.addTarget(self, action: #selector(toggleFeed), for: .touchUpInside)
         view.addSubview(b)
         NSLayoutConstraint.activate([
-            b.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 6),
             b.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
-            b.widthAnchor.constraint(equalToConstant: 64),
-            b.heightAnchor.constraint(equalToConstant: 30),
+            b.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -12),
+            b.widthAnchor.constraint(equalToConstant: 76),
+            b.heightAnchor.constraint(equalToConstant: 32),
         ])
         switchButton = b
+
+        let dot = UILabel()
+        dot.text = "原生已挂载"
+        dot.textColor = .white
+        dot.font = .systemFont(ofSize: 11)
+        dot.backgroundColor = UIColor(red: 0, green: 0.55, blue: 0.2, alpha: 0.9)
+        dot.textAlignment = .center
+        dot.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(dot)
+        NSLayoutConstraint.activate([
+            dot.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
+            dot.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            dot.widthAnchor.constraint(equalToConstant: 90),
+            dot.heightAnchor.constraint(equalToConstant: 20),
+        ])
+        badge = dot
     }
 
-    @objc private func toggleNative() {
+    @objc private func toggleFeed() {
         if nativeFeed != nil {
             removeNativeFeed()
         } else {
@@ -85,34 +81,17 @@ class BridgeViewController: CAPBridgeViewController {
         }
     }
 
-    private func removeNativeFeed() {
-        guard let feed = nativeFeed else { return }
-        feed.willMove(toParent: nil)
-        feed.view.removeFromSuperview()
-        feed.removeFromParent()
-        nativeFeed = nil
-        switchButton?.setTitle("原生", for: .normal)
-    }
-
-    // MARK: - 挂载 / 卸载
-
     private func mountNativeFeed() {
-        guard view.window != nil else {
-            showBanner("无法挂载：view 不在 window 上")
-            return
-        }
+        guard nativeFeed == nil, view.window != nil else { return }
 
         let feed = FeedViewController()
-        addChild(feed)   // 先 addChild，再碰 view
-
-        guard let fv = feed.view else {
+        addChild(feed)                    // 先 addChild
+        guard let fv = feed.view else {   // 再取 view
             feed.removeFromParent()
-            showBanner("FeedViewController.view 为 nil")
             return
         }
-
         fv.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(fv)
+        view.insertSubview(fv, at: 0)
         NSLayoutConstraint.activate([
             fv.topAnchor.constraint(equalTo: view.topAnchor),
             fv.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -121,74 +100,20 @@ class BridgeViewController: CAPBridgeViewController {
         ])
         feed.didMove(toParent: self)
         nativeFeed = feed
-        if let btn = switchButton {
-            view.bringSubviewToFront(btn)
-            btn.setTitle("网页", for: .normal)
-        }
+        badge?.text = "原生已挂载"
+        badge?.backgroundColor = UIColor(red: 0, green: 0.55, blue: 0.2, alpha: 0.9)
+        switchButton?.setTitle("切网页", for: .normal)
     }
 
-    // MARK: - 崩溃记录
-
-    private func installCrashHandlers() {
-        NSSetUncaughtExceptionHandler { exception in
-            // 注意：这里只有少量时间，尽量只做一件纯内存的事
-            let name = exception.name.rawValue
-            let reason = exception.reason ?? ""
-            let stack = exception.callStackSymbols.prefix(16).joined(separator: "\n")
-            let msg = "\(name)\n\(reason)\n---\n\(stack)"
-            UserDefaults.standard.set(msg, forKey: "dzc.lastCrash")
-        }
-    }
-
-    private func loadPreviousCrash() {
-        guard let last = UserDefaults.standard.string(forKey: "dzc.lastCrash"),
-              !last.isEmpty,
-              last != UserDefaults.standard.string(forKey: "dzc.shownCrash") else { return }
-        UserDefaults.standard.set(last, forKey: "dzc.shownCrash")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-            self?.showBanner("上次崩溃：\n" + last)
-        }
-    }
-
-    private func showBanner(_ text: String) {
-        errorBanner?.removeFromSuperview()
-        let label = UILabel()
-        label.numberOfLines = 0
-        label.text = text
-        label.textColor = .white
-        label.font = UIFont(name: "Menlo", size: 10) ?? .systemFont(ofSize: 10)
-        label.backgroundColor = UIColor(red: 0.65, green: 0.05, blue: 0.15, alpha: 0.96)
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.isUserInteractionEnabled = true
-        label.addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(dismissBanner)))
-
-        // 加个滚动，长堆栈也能看全
-        let scroll = UIScrollView()
-        scroll.backgroundColor = UIColor(red: 0.65, green: 0.05, blue: 0.15, alpha: 0.96)
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.addSubview(label)
-        view.addSubview(scroll)
-
-        NSLayoutConstraint.activate([
-            scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            scroll.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            scroll.heightAnchor.constraint(equalToConstant: 260),
-
-            label.leadingAnchor.constraint(equalTo: scroll.leadingAnchor, constant: 8),
-            label.trailingAnchor.constraint(equalTo: scroll.trailingAnchor, constant: -8),
-            label.topAnchor.constraint(equalTo: scroll.topAnchor, constant: 8),
-            label.bottomAnchor.constraint(equalTo: scroll.bottomAnchor, constant: -8),
-            label.widthAnchor.constraint(equalTo: scroll.widthAnchor, constant: -16),
-        ])
-        errorBanner = label
-        scroll.tag = 0xD2C
-    }
-
-    @objc private func dismissBanner() {
-        (errorBanner?.superview as? UIScrollView)?.removeFromSuperview()
-        view.viewWithTag(0xD2C)?.removeFromSuperview()
-        errorBanner = nil
+    private func removeNativeFeed() {
+        guard let feed = nativeFeed else { return }
+        feed.willMove(toParent: nil)
+        feed.view.removeFromSuperview()
+        feed.removeFromParent()
+        nativeFeed = nil
+        badge?.text = "网页模式"
+        badge?.backgroundColor = UIColor(white: 0.3, alpha: 0.9)
+        switchButton?.setTitle("切原生", for: .normal)
     }
 
     override var prefersStatusBarHidden: Bool { false }
