@@ -152,9 +152,17 @@ final class FeedViewController: UIViewController {
     }
 
     private func visibleCell() -> FeedCell? {
-        collectionView.visibleCells.compactMap { $0 as? FeedCell }
-            .min { abs($0.center.y - collectionView.contentOffset.y - view.bounds.height / 2)
-                 < abs($1.center.y - collectionView.contentOffset.y - view.bounds.height / 2) }
+        let centerY = collectionView.contentOffset.y + view.bounds.height / 2
+        var best: FeedCell?
+        var bestDist = CGFloat.greatestFiniteMagnitude
+        for case let cell as FeedCell in collectionView.visibleCells {
+            let d = abs(cell.center.y - centerY)
+            if d < bestDist {
+                bestDist = d
+                best = cell
+            }
+        }
+        return best
     }
 
     // MARK: - 数据

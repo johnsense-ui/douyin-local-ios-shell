@@ -208,16 +208,24 @@ final class FeedCell: UICollectionViewCell {
     }
 
     private func makeActionButton(symbol: String, label: String) -> UIButton {
-        var cfg = UIButton.Configuration.plain()
-        cfg.image = UIImage(systemName: symbol, withConfiguration: UIImage.SymbolConfiguration(pointSize: 30, weight: .regular))
-        cfg.title = label
-        cfg.imagePlacement = .top
-        cfg.imagePadding = 3
-        cfg.baseForegroundColor = .white
-        cfg.contentInsets = .zero
-        let b = UIButton(configuration: cfg)
-        b.titleLabel?.font = .systemFont(ofSize: 12)
+        // iOS 15 的 UIButton.Configuration 在这里用不上（部署目标是 13.0），
+        // 所以用老的 titleLabel + imageEdgeInsets 手工排布，兼容到 iOS 13。
+        let b = UIButton(type: .custom)
+        let cfg = UIImage.SymbolConfiguration(pointSize: 30, weight: .regular)
+        let img = UIImage(systemName: symbol, withConfiguration: cfg)
+        b.setImage(img, for: .normal)
+        // 先 setTitle，titleLabel 和 intrinsicContentSize 才有值
+        b.setTitle(label, for: .normal)
         b.tintColor = .white
+        b.setTitleColor(.white, for: .normal)
+        b.titleLabel?.font = .systemFont(ofSize: 12)
+        b.titleLabel?.textAlignment = .center
+
+        // 图标在上、文字在下（不用 force unwrap，避免 setTitle 之前拿到 nil 崩）
+        let titleW = b.titleLabel?.intrinsicContentSize.width ?? 0
+        let imgW = img?.size.width ?? 0
+        b.imageEdgeInsets = UIEdgeInsets(top: -22, left: 0, bottom: 0, right: -titleW)
+        b.titleEdgeInsets = UIEdgeInsets(top: 26, left: -imgW, bottom: 0, right: 0)
         return b
     }
 
@@ -292,9 +300,7 @@ final class FeedCell: UICollectionViewCell {
     }
 
     func setActionTitle(_ btn: UIButton, _ title: String) {
-        var cfg = btn.configuration
-        cfg?.title = title
-        btn.configuration = cfg
+        btn.setTitle(title, for: .normal)
     }
 
     /// 播放器的 layer 挂到本 cell

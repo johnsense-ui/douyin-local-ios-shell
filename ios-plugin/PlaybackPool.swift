@@ -106,7 +106,7 @@ final class PlaybackPool {
             // 只准备首帧，不解码
             current.player.rate = 0
         }
-        onState("loaded", id)
+        onState?("loaded", id)
     }
 
     private func prepare(_ slot: Slot, id: Int, url: URL) {
@@ -177,12 +177,12 @@ final class PlaybackPool {
         let n = (retryCount[id] ?? 0) + 1
         retryCount[id] = n
         if n <= 2 {
-            onState("retry", id)
+            onState?("retry", id)
             slot.player.replaceCurrentItem(with: makeItem(url: url, playing: true))
             attachObservers(to: slot, index: index)
             slot.player.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
         } else {
-            onState("error", id)
+            onState?("error", id)
         }
     }
 
@@ -194,7 +194,7 @@ final class PlaybackPool {
             s.layer.opacity = (i == currentIndex) ? 1 : 0
         }
         CATransaction.commit()
-        onState("ready", current.videoID)
+        onState?("ready", current.videoID)
     }
 
     // MARK: - 播放控制
@@ -203,7 +203,7 @@ final class PlaybackPool {
         guard current.player.currentItem?.status == .readyToPlay else { return }
         if current.player.rate == 0 {
             current.player.play()
-            onState("playing", current.videoID)
+            onState?("playing", current.videoID)
         }
     }
 
@@ -214,7 +214,7 @@ final class PlaybackPool {
             playDebounce?.cancel()
             playDebounce = nil
             current.player.pause()
-            onState("scrubbing", current.videoID)
+            onState?("scrubbing", current.videoID)
         } else {
             // 停稳后 150ms 才真正起播 —— 给吸附动画留时间，避免抖
             schedulePlay(after: 0.15)
@@ -238,7 +238,7 @@ final class PlaybackPool {
         if current.player.currentItem?.status == .readyToPlay {
             startNow()
         } else {
-            onState("wantplay", current.videoID)
+            onState?("wantplay", current.videoID)
         }
     }
 
@@ -246,7 +246,7 @@ final class PlaybackPool {
         wantsPlay = false
         playDebounce?.cancel()
         current.player.pause()
-        onState("paused", current.videoID)
+        onState?("paused", current.videoID)
     }
 
     func togglePlay() {
@@ -302,11 +302,11 @@ final class PlaybackPool {
         if priming {
             // 快速滑动：只出首帧，绝不解码
             current.player.rate = 0
-            onState("primed", current.videoID)
+            onState?("primed", current.videoID)
         } else if wantsPlay {
             schedulePlay(after: 0)
         }
-        onState(dir > 0 ? "advanced_down" : "advanced_up", current.videoID)
+        onState?(dir > 0 ? "advanced_down" : "advanced_up", current.videoID)
     }
 
     /// 给"下下条"预填（JS/VC 拿到新数据后调用）
