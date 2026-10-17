@@ -246,29 +246,32 @@
     setInterval(pushToNative, 1000);
   }
 
-  /** 服务器地址设置：原生壳里首次启动必须填，否则 /api 请求没地方去。 */
+  /** 首启弹框已交给 boot-early.js（它比本脚本先跑）。
+   *  这里只做兜底：万一 boot-early 没执行（比如被缓存），至少填一次再继续。 */
   function promptServerIfNeeded() {
     if (serverBase()) return false;
+    if (document.getElementById('dzc-server-setup')) return true; // 已经有一个了
     var shell = document.createElement('div');
     shell.id = 'dzc-server-setup';
     shell.innerHTML =
-      '<div style="position:fixed;inset:0;z-index:99999;background:#111;color:#eee;' +
+      '<div style="position:fixed;inset:0;z-index:2147483647;background:#111;color:#eee;' +
       'display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;' +
-      'font:15px -apple-system,sans-serif;padding:24px;">' +
-      '<div style="font-size:17px;font-weight:600;">首次使用：填写服务器地址</div>' +
-      '<div style="color:#9aa;font-size:13px;line-height:1.6;text-align:center;max-width:320px;">' +
-      '例如 http://192.168.1.10:6688 或你的 Tailscale 地址<br>（需带 http:// 或 https://）</div>' +
-      '<input id="dzc-server-input" placeholder="http://…" autocomplete="off" ' +
-      'style="width:100%;max-width:320px;padding:12px;border-radius:10px;border:1px solid #333;' +
-      'background:#1b1b1f;color:#eee;font-size:15px;" />' +
-      '<button id="dzc-server-ok" style="width:100%;max-width:320px;padding:12px;border-radius:10px;' +
-      'border:none;background:#fe2c55;color:#fff;font-size:16px;">保存并继续</button>' +
+      'font:15px -apple-system,sans-serif;padding:24px;box-sizing:border-box;">' +
+      '<div style="font-size:19px;font-weight:600;">填写服务器地址</div>' +
+      '<div style="color:#9aa;font-size:13px;line-height:1.7;text-align:center;max-width:320px;">' +
+      '例如 <b>http://192.168.1.10:6688</b><br>或你的 Tailscale 地址<br>（必须带 http:// 或 https://）</div>' +
+      '<input id="dzc-server-input" placeholder="http://..." autocomplete="off" ' +
+      'autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="url" ' +
+      'style="width:100%;max-width:320px;padding:14px;border-radius:10px;border:1px solid #333;' +
+      'background:#1b1b1f;color:#eee;font-size:16px;box-sizing:border-box;" />' +
+      '<button id="dzc-server-ok" style="width:100%;max-width:320px;padding:14px;border-radius:10px;' +
+      'border:none;background:#fe2c55;color:#fff;font-size:16px;box-sizing:border-box;">保存并继续</button>' +
       '<div id="dzc-server-err" style="color:#f55;font-size:13px;height:18px;"></div>' +
       '</div>';
     document.body.appendChild(shell);
     document.getElementById('dzc-server-ok').addEventListener('click', function () {
       var v = (document.getElementById('dzc-server-input').value || '').trim();
-      if (!/^https?:\/\//i.test(v)) {
+      if (!/^https?:\/\/.+/i.test(v)) {
         document.getElementById('dzc-server-err').textContent = '需要以 http:// 或 https:// 开头';
         return;
       }

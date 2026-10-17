@@ -11,20 +11,9 @@
     <meta name="theme-color" content="#0b0b0f" />
     <meta name="description" content="douyin-local — 本地短视频播放器，竖屏无限滑动 + 桌面封面墙" />
     <title>douyin-local · 本地短视频</title>
-    <script type="module" crossorigin src="/assets/index-DWjfldz0.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-CLW0-B6F.css">
-    <script>/* 由 _ios-shell/scripts/copy-web.mjs 注入：壳内引导（必须最先执行） */
-(function () {
-  if (!/^(capacitor|ionic):$/.test(location.protocol)) return; // 只壳内生效
-  window.__IS_SHELL__ = true;
-  var p = location.pathname || '/';
-  var s = location.search || '';
-  var h = location.hash || '';
-  // history 路由 -> hash 路由（只改这一次，改完连 reload 都不会丢）
-  if (!h) {
-    location.replace(location.origin + '/#' + p + s);
-  }
-})();</script>
+    <script type="module" crossorigin src="./assets/index-DWjfldz0.js"></script>
+    <link rel="stylesheet" crossorigin href="./assets/index-CLW0-B6F.css">
+    <script src="./boot-early.js"></script>
   <script src="./net-patch.js"></script>
   <script src="./native-bridge.js"></script>
 </head>
