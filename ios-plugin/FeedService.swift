@@ -74,10 +74,11 @@ final class FeedService {
 
     /// 预取首帧图（让 UICollectionView 滚起来不缺图）
     func prefetchFirstFrames(_ items: [VideoItem]) {
+        let b = base
         for v in items {
-            guard let u = v.firstFrameURL(base: base) else { continue }
-            var req = URLRequest(url: u)
-            req.cachePolicy = .returnCacheDataElseLoad
+            guard let u = v.firstFrameURL(b) else { continue }
+            var req: URLRequest = URLRequest(url: u)
+            req.cachePolicy = URLRequest.CachePolicy.returnCacheDataElseLoad
             session.dataTask(with: req) { _, _, _ in }.resume()
         }
     }
