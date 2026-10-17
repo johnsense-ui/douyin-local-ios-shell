@@ -107,9 +107,10 @@ final class FeedViewController: UIViewController {
         view.addSubview(setupButton)
 
         // 左下角诊断：三击切换显示
-        debugLabel.textColor = UIColor(red: 0.2, green: 1, blue: 0.4, alpha: 1)
-        debugLabel.font = UIFont(name: "Menlo", size: 10) ?? .systemFont(ofSize: 10)
-        debugLabel.numberOfLines = 4
+        debugLabel.textColor = UIColor(red: 0.3, green: 1, blue: 0.5, alpha: 1)
+        debugLabel.backgroundColor = UIColor(white: 0, alpha: 0.72)
+        debugLabel.font = UIFont(name: "Menlo", size: 9) ?? .systemFont(ofSize: 9)
+        debugLabel.numberOfLines = 8
         debugLabel.isHidden = true
         debugLabel.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(debugLabel)
@@ -133,16 +134,33 @@ final class FeedViewController: UIViewController {
             debugLabel.widthAnchor.constraint(equalToConstant: 280),
         ])
 
-        // 单击暂停/播放，三击开关诊断
+        // 诊断按钮：放在最上层，不跟 collectionView 抢手势
+        let dbgBtn = UIButton(type: .custom)
+        dbgBtn.setTitle("诊断", for: .normal)
+        dbgBtn.setTitleColor(.white, for: .normal)
+        dbgBtn.titleLabel?.font = .systemFont(ofSize: 11, weight: .medium)
+        dbgBtn.backgroundColor = UIColor(red: 0, green: 0.5, blue: 0.2, alpha: 0.85)
+        dbgBtn.layer.cornerRadius = 11
+        dbgBtn.translatesAutoresizingMaskIntoConstraints = false
+        dbgBtn.addTarget(self, action: #selector(toggleDebug), for: .touchUpInside)
+        view.addSubview(dbgBtn)
+
+        // 单击暂停/播放挂在 collectionView 上（这是短视频的标准交互）
         let tap1 = UITapGestureRecognizer(target: self, action: #selector(handleTap))
-        let tap3 = UITapGestureRecognizer(target: self, action: #selector(toggleDebug))
-        tap3.numberOfTapsRequired = 3
-        tap1.require(toFail: tap3)
         collectionView.addGestureRecognizer(tap1)
-        collectionView.addGestureRecognizer(tap3)
+
+        NSLayoutConstraint.activate([
+            dbgBtn.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
+            dbgBtn.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            dbgBtn.widthAnchor.constraint(equalToConstant: 56),
+            dbgBtn.heightAnchor.constraint(equalToConstant: 22),
+        ])
+
+        // 先默认显示，方便你第一眼就能看到状态
+        debugLabel.isHidden = false
 
         // 诊断刷新
-        Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+        Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in
             guard let self, !self.debugLabel.isHidden else { return }
             self.debugLabel.text = self.pool.debugInfo()
         }

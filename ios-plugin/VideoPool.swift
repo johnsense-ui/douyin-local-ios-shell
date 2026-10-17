@@ -244,9 +244,50 @@ final class VideoPool {
         let s = standby
         let cs = statusText(c.player.currentItem?.status)
         let ss = statusText(s.player.currentItem?.status)
-        return "当前 id=\(c.videoID ?? -1) \(cs) op=\(String(format: "%.0f", c.layer.opacity)) rate=\(String(format: "%.1f", c.player.rate))"
-            + "\n备用 id=\(s.videoID ?? -1) \(ss)"
-            + "\nscrubbing=\(isScrubbing) wantsPlay=\(wantsPlay)"
+
+        var lines: [String] = []
+        lines.append("cur id=\(c.videoID ?? -1) \(cs) op=\(String(format: "%.1f", c.layer.opacity)) rate=\(String(format: "%.1f", c.player.rate))")
+        lines.append("  ready4display=\(c.layer.isReadyForDisplay) buf=\(String(format: "%.1f", buffered(c.player)))s")
+        lines.append("  t=\(String(format: "%.1f", currentTime(c.player)))s / \(String(format: "%.1f", duration(c.player)))s")
+
+        // 失败时把 NSError 带出来 —— 这是最有用的信息
+        if let err = c.player.currentItem?.error {
+            let ns = err as NSError
+            lines.append("  ERR \(ns.domain)#\(ns.code)")
+            lines.append("  \(ns.localizedDescription)")
+        }
+        if let le = c.player.currentItem?.errorLog(), let ev = le.events.last {
+            lines.append("  log \(ev.errorStatusCode) \(ev.errorComment ?? "")")
+        }
+
+        lines.append("standby id=\(s.videoID ?? -1) \(ss)")
+        lines.append("scrubbing=\(isScrubbing) wants=\(wantsPlay)")
+
+        if let u = c.url, let url = URL(string: u) {
+            lines.append("url \(url.host ?? "?")\(url.path)\(url.query.map { "?" + $0 } ?? "")")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func currentTime(_ p: AVPlayer) -> Double {
+        let t = CMTimeGetSeconds(p.currentTime())
+        return t.isFinite ? t : 0
+    }
+
+    private func duration(_ p: AVPlayer) -> Double {
+        guard let d = p.currentItem?.duration else { return 0 }
+        let t = CMTimeGetSeconds(d)
+        return t.isFinite ? t : 0
+    }
+
+    private func buffered(_ p: AVPlayer) -> Double {
+        guard let item = p.currentItem else { return 0 }
+        let pos = currentTime(p)
+        let end = item.loadedTimeRanges
+            .map { CMTimeGetSeconds($0.timeRangeValue.start + $0.timeRangeValue.duration) }
+            .max() ?? 0
+        let v = end - pos
+        return v.isFinite && v > 0 ? v : 0
     }
 
     private func statusText(_ s: AVPlayerItem.Status?) -> String {
