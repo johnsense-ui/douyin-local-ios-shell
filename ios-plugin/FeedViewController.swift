@@ -323,7 +323,10 @@ extension FeedViewController: UICollectionViewDataSource, UICollectionViewDelega
     }
 
     func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
-        let cell = collectionView.dequeueReusableCell(withReuseIdentifier: FeedCell.reuseID, for: indexPath) as! FeedCell
+        // 不用 as!：万一 reuseID 撞了，as! 会直接崩，dequeue 失败也崩
+        guard let cell = collectionView.dequeueReusableCell(withReuseIdentifier: FeedCell.reuseID, for: indexPath) as? FeedCell else {
+            return UICollectionViewCell()
+        }
         guard indexPath.item < items.count else { return cell }
         let item = items[indexPath.item]
         cell.bind(item, base: service.base)

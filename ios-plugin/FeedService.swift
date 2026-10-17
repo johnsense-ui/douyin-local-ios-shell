@@ -32,7 +32,10 @@ final class FeedService {
                 userInfo: [NSLocalizedDescriptionKey: "还没设置服务器地址"])))
             return
         }
-        var comps = URLComponents(string: "\(base)/api/videos")!
+        guard var comps = URLComponents(string: "\(base)/api/videos") else {
+            completion(.failure(NSError(domain: "dzc", code: -3, userInfo: [NSLocalizedDescriptionKey: "服务器地址不合法"])))
+            return
+        }
         // seed 固定住，翻页才不会重复/漏
         let seed = UserDefaults.standard.integer(forKey: "dzc.feedSeed")
         let realSeed = seed == 0 ? Int(Date().timeIntervalSince1970) : seed

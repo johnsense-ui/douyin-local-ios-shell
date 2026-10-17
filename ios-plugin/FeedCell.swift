@@ -43,7 +43,7 @@ final class FeedCell: UICollectionViewCell {
     // MARK: - 进度
     private let progressTrack = UIView()
     private let progressFill = UIView()
-    private var progressWidth: NSLayoutConstraint!
+    private var progressWidth: NSLayoutConstraint?
     private let pauseOverlay = UIView()
 
     private var itemID: Int?
@@ -92,6 +92,9 @@ final class FeedCell: UICollectionViewCell {
         rightStack.spacing = 18
         rightStack.alignment = .center
         contentView.addSubview(rightStack)
+        // 【坑】这个方法只能调一次。
+        // UIStackView.addArrangedSubview 对同一个 view 调两次会抛
+        // NSInternalInconsistencyException → 启动就闪退。
         configureRightStack()
 
         // ---- 底部信息
@@ -130,12 +133,16 @@ final class FeedCell: UICollectionViewCell {
             topBar.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
             topBar.heightAnchor.constraint(equalToConstant: 36),
 
-            rightStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
-            rightStack.bottomAnchor.constraint(equalTo: bottomBar.topAnchor, constant: -16),
+            // 右侧按钮：只靠 trailing + 一个垂直定位。不要跟 bottomBar 互相约束，
+            // 否则 rightStack.bottom ← bottomBar.top ← rightStack.leading 会成环，
+            // 环一旦解不开就刷约束警告，严重时直接崩。
+            rightStack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -10),
+            rightStack.centerYAnchor.constraint(equalTo: contentView.centerYAnchor, constant: 40),
 
+            // 底部信息：左右各自定位，宽度不依赖 rightStack
             bottomBar.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
-            bottomBar.trailingAnchor.constraint(equalTo: rightStack.leadingAnchor, constant: -12),
-            bottomBar.bottomAnchor.constraint(equalTo: contentView.safeAreaLayoutGuide.bottomAnchor, constant: -8),
+            bottomBar.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -80),
+            bottomBar.bottomAnchor.constraint(equalTo: contentView.safeAreaLayoutGuide.bottomAnchor, constant: -10),
 
             centerPlayIcon.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
             centerPlayIcon.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
@@ -148,12 +155,13 @@ final class FeedCell: UICollectionViewCell {
             progressTrack.heightAnchor.constraint(equalToConstant: 2),
         ])
 
-        progressWidth = progressFill.widthAnchor.constraint(equalToConstant: 0)
+        let pw = progressFill.widthAnchor.constraint(equalToConstant: 0)
+        progressWidth = pw
         NSLayoutConstraint.activate([
             progressFill.leadingAnchor.constraint(equalTo: progressTrack.leadingAnchor),
             progressFill.topAnchor.constraint(equalTo: progressTrack.topAnchor),
             progressFill.bottomAnchor.constraint(equalTo: progressTrack.bottomAnchor),
-            progressWidth,
+            pw,
         ])
     }
 
@@ -208,24 +216,29 @@ final class FeedCell: UICollectionViewCell {
     }
 
     private func makeActionButton(symbol: String, label: String) -> UIButton {
-        // iOS 15 的 UIButton.Configuration 在这里用不上（部署目标是 13.0），
-        // 所以用老的 titleLabel + imageEdgeInsets 手工排布，兼容到 iOS 13。
+        // iOS 15 的 UIButton.Configuration 用不了（部署目标 13.0），
+        // 用 setImage/setTitle + imageEdgeInsets 手工排布。
+        //
+        // 【闪退教训】不要在这里读 titleLabel.intrinsicContentSize 或 currentImage.size
+        // 来算 inset —— 此刻还没布局，值可能是 0 甚至 nil，
+        // 一旦不小心用了 `!` 就直接崩。这里全部用固定值。
         let b = UIButton(type: .custom)
-        let cfg = UIImage.SymbolConfiguration(pointSize: 30, weight: .regular)
-        let img = UIImage(systemName: symbol, withConfiguration: cfg)
-        b.setImage(img, for: .normal)
-        // 先 setTitle，titleLabel 和 intrinsicContentSize 才有值
+        let cfg = UIImage.SymbolConfiguration(pointSize: 28, weight: .regular)
+        b.setImage(UIImage(systemName: symbol, withConfiguration: cfg), for: .normal)
         b.setTitle(label, for: .normal)
         b.tintColor = .white
         b.setTitleColor(.white, for: .normal)
         b.titleLabel?.font = .systemFont(ofSize: 12)
         b.titleLabel?.textAlignment = .center
-
-        // 图标在上、文字在下（不用 force unwrap，避免 setTitle 之前拿到 nil 崩）
-        let titleW = b.titleLabel?.intrinsicContentSize.width ?? 0
-        let imgW = img?.size.width ?? 0
-        b.imageEdgeInsets = UIEdgeInsets(top: -22, left: 0, bottom: 0, right: -titleW)
-        b.titleEdgeInsets = UIEdgeInsets(top: 26, left: -imgW, bottom: 0, right: 0)
+        b.titleLabel?.lineBreakMode = .byClipping
+        // 固定 56x60：图标在上、文字在下，不依赖任何运行时测量
+        b.imageEdgeInsets = UIEdgeInsets(top: -32, left: 0, bottom: 0, right: 0)
+        b.titleEdgeInsets = UIEdgeInsets(top: 20, left: 0, bottom: 0, right: 0)
+        b.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            b.widthAnchor.constraint(equalToConstant: 56),
+            b.heightAnchor.constraint(equalToConstant: 58),
+        ])
         return b
     }
 
@@ -329,6 +342,6 @@ final class FeedCell: UICollectionViewCell {
 
     func setProgress(_ ratio: Double) {
         let w = contentView.bounds.width * CGFloat(max(0, min(1, ratio)))
-        progressWidth.constant = w
+        progressWidth?.constant = w
     }
 }
