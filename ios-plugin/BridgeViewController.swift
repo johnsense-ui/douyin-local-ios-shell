@@ -55,25 +55,16 @@ class BridgeViewController: CAPBridgeViewController {
     // MARK: - 切换按钮
 
     private func addSwitchButton() {
-        var cfg = UIButton.Configuration.plain() as UIButton.Configuration?
-        if #available(iOS 15, *) {
-            cfg = UIButton.Configuration.plain()
-            cfg?.title = "原生"
-            cfg?.baseForegroundColor = .white
-            cfg?.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 12, bottom: 6, trailing: 12)
-            cfg?.background.backgroundColor = UIColor(white: 0, alpha: 0.55)
-            cfg?.background.cornerRadius = 14
-        }
-        let b = UIButton(frame: CGRect(x: 0, y: 0, width: 64, height: 30))
-        if #available(iOS 15, *), let c = cfg {
-            b.configuration = c
-        } else {
-            b.setTitle("原生", for: .normal)
-            b.setTitleColor(.white, for: .normal)
-            b.backgroundColor = UIColor(white: 0, alpha: 0.55)
-            b.layer.cornerRadius = 14
-            b.titleLabel?.font = .systemFont(ofSize: 13)
-        }
+        // 不用 UIButton.Configuration（iOS 15+ 的类型不能出现在声明里，会编译错）。
+        // 全部走 iOS 13 就能用的属性写法。
+        let b = UIButton(type: .custom)
+        b.setTitle("原生", for: .normal)
+        b.setTitleColor(.white, for: .normal)
+        b.titleLabel?.font = .systemFont(ofSize: 13, weight: .medium)
+        b.backgroundColor = UIColor(white: 0, alpha: 0.55)
+        b.layer.cornerRadius = 14
+        b.layer.borderWidth = 0.5
+        b.layer.borderColor = UIColor(white: 1, alpha: 0.35).cgColor
         b.translatesAutoresizingMaskIntoConstraints = false
         b.addTarget(self, action: #selector(toggleNative), for: .touchUpInside)
         view.addSubview(b)
@@ -101,11 +92,6 @@ class BridgeViewController: CAPBridgeViewController {
         feed.removeFromParent()
         nativeFeed = nil
         switchButton?.setTitle("原生", for: .normal)
-        if #available(iOS 15, *) {
-            var c = switchButton?.configuration
-            c?.title = "原生"
-            switchButton?.configuration = c
-        }
     }
 
     // MARK: - 挂载 / 卸载
@@ -135,14 +121,9 @@ class BridgeViewController: CAPBridgeViewController {
         ])
         feed.didMove(toParent: self)
         nativeFeed = feed
-        view.bringSubviewToFront(switchButton!)
-
-        if #available(iOS 15, *) {
-            var c = switchButton?.configuration
-            c?.title = "网页"
-            switchButton?.configuration = c
-        } else {
-            switchButton?.setTitle("网页", for: .normal)
+        if let btn = switchButton {
+            view.bringSubviewToFront(btn)
+            btn.setTitle("网页", for: .normal)
         }
     }
 
