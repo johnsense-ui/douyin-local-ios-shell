@@ -257,7 +257,7 @@ import UIKit
         }
 
         currentLoadFailures = 0
-        setItem(current, url: u, id: id)
+        setItem(curSlot, url: u, id: id)
         observe(slotAt: currentIndex)
 
         if let nextID, let nextURL, let nu = URL(string: nextURL) {
